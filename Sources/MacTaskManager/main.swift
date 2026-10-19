@@ -11,6 +11,7 @@ import Metal
 
 @main
 struct MacTaskManagerApp: App {
+    @NSApplicationDelegateAdaptor(AppLifecycleDelegate.self) private var appLifecycleDelegate
     @StateObject private var monitor = SystemMonitor()
 
     var body: some Scene {
@@ -21,7 +22,7 @@ struct MacTaskManagerApp: App {
         }
         .defaultSize(width: 1280, height: 850)
         .windowResizability(.contentMinSize)
-        .windowStyle(.automatic)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("View") {
@@ -32,8 +33,12 @@ struct MacTaskManagerApp: App {
     }
 }
 
+private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
 enum Page: String, CaseIterable, Identifiable {
-    case summary = "Summary", performance = "Performance", processes = "Processes", appleDevices = "Apple devices", systemInfo = "System Info", startupApps = "Startup apps", users = "Users"
+    case summary = "Summary", performance = "Performance", processes = "Processes", appleDevices = "Ecosystem", systemInfo = "System Info", startupApps = "Startup apps", users = "Users"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -90,6 +95,8 @@ struct AppleDevice: Identifiable {
 
 struct EnergyStatus {
     let batteryPercent: Double?
+    let batteryHealth: String?
+    let cycleCount: Int?
     let adapterWatts: Double?
     let powerSource: String
     let charging: Bool
@@ -105,16 +112,31 @@ struct HardwareInfo {
     let model: String
     let chip: String
     let cores: Int
+    let physicalCores: Int
     let memory: UInt64
+    let memoryVendor: String
+    let memoryType: String
+    let gpuCores: String
     let macOS: String
 
     static func read() -> HardwareInfo {
         let model = sysctlString("hw.model") ?? "Mac"
         let chip = sysctlString("machdep.cpu.brand_string") ?? model
         let cores = Int(ProcessInfo.processInfo.processorCount)
+        let physicalCores = sysctlInteger("hw.physicalcpu") ?? cores
         let memory = ProcessInfo.processInfo.physicalMemory
+        let profiler = readSystemProfiler()
+        let memorySection = (profiler as? [String: Any])?["SPMemoryDataType"]
+        let displaySection = (profiler as? [String: Any])?["SPDisplaysDataType"]
+        let memoryVendor = profilerValue(in: memorySection, matching: ["dimm_manufacturer", "memory_manufacturer", "manufacturer"])
+            ?? "Not exposed by macOS"
+        let reportedMemoryType = profilerValue(in: memorySection, matching: ["dimm_type", "memory_type", "memory type"])
+        let memoryType = reportedMemoryType ?? "Unified memory (DDR version not exposed)"
+        let gpuCores = profilerValue(in: displaySection, matching: ["gpu_cores", "spdisplays_cores", "sppci_cores", "total_number_of_cores", "core_count"])
+            ?? "Not reported by macOS"
         return HardwareInfo(model: model, chip: chip.trimmingCharacters(in: .whitespacesAndNewlines), cores: cores,
-                            memory: memory, macOS: ProcessInfo.processInfo.operatingSystemVersionString)
+                            physicalCores: physicalCores, memory: memory, memoryVendor: memoryVendor,
+                            memoryType: memoryType, gpuCores: gpuCores, macOS: ProcessInfo.processInfo.operatingSystemVersionString)
     }
 }
 
@@ -124,6 +146,57 @@ private func sysctlString(_ name: String) -> String? {
     var bytes = [CChar](repeating: 0, count: size)
     guard sysctlbyname(name, &bytes, &size, nil, 0) == 0 else { return nil }
     return String(cString: bytes)
+}
+
+private func sysctlInteger(_ name: String) -> Int? {
+    var value: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    guard sysctlbyname(name, &value, &size, nil, 0) == 0, value > 0 else { return nil }
+    return Int(value)
+}
+
+private func readSystemProfiler() -> Any? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+    process.arguments = ["-json", "SPMemoryDataType", "SPDisplaysDataType"]
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    do {
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return try JSONSerialization.jsonObject(with: data)
+    } catch {
+        return nil
+    }
+}
+
+private func profilerValue(in root: Any?, matching needles: [String]) -> String? {
+    func visit(_ value: Any) -> [String] {
+        if let dictionary = value as? [String: Any] {
+            var matches: [String] = []
+            for (key, nested) in dictionary {
+                let normalizedKey = key.lowercased().replacingOccurrences(of: " ", with: "_")
+                if needles.contains(where: normalizedKey.contains),
+                   let text = nested as? String,
+                   !text.isEmpty,
+                   !text.localizedCaseInsensitiveContains("unknown") {
+                    matches.append(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                } else {
+                    matches.append(contentsOf: visit(nested))
+                }
+            }
+            return matches
+        }
+        if let array = value as? [Any] { return array.flatMap(visit) }
+        return []
+    }
+    let values = visit(root ?? NSNull())
+    let unique = Array(NSOrderedSet(array: values)) as? [String] ?? values
+    guard !unique.isEmpty else { return nil }
+    return unique.joined(separator: ", ")
 }
 
 final class SystemMonitor: ObservableObject {
@@ -138,7 +211,7 @@ final class SystemMonitor: ObservableObject {
     @Published var gpuUsage: Double?
     @Published var externalVolumes: [ExternalVolume] = []
     @Published var appleDevices: [AppleDevice] = []
-    @Published var energyStatus = EnergyStatus(batteryPercent: nil, adapterWatts: nil, powerSource: "Checking…", charging: false, lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
+    @Published var energyStatus = EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: nil, powerSource: "Checking…", charging: false, lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
     @Published var batteryHistory: [Sample] = []
     @Published var cpuUsage = 0.0
     @Published var memoryUsed: UInt64 = 0
@@ -166,7 +239,9 @@ final class SystemMonitor: ObservableObject {
         cpuUsage = min(100, processes.reduce(0) { $0 + $1.cpu } / Double(max(hardware.cores, 1)))
         memoryUsed = Self.readMemoryUsed()
         let net = Self.readNetworkBytes()
-        networkRate = Double(net >= previousNetwork ? net - previousNetwork : 0) / interval
+        // Ignore loopback and cap counter discontinuities at a 10 Gbit/s physical link rate.
+        let measuredNetworkRate = Double(net >= previousNetwork ? net - previousNetwork : 0) / interval
+        networkRate = min(measuredNetworkRate, 1_250_000_000)
         previousNetwork = net
         uptime = ProcessInfo.processInfo.systemUptime
         append(cpuUsage, to: &cpuHistory, at: now)
@@ -253,7 +328,9 @@ final class SystemMonitor: ObservableObject {
         var item: UnsafeMutablePointer<ifaddrs>? = first
         while let current = item {
             let data = current.pointee.ifa_data
-            if current.pointee.ifa_addr.pointee.sa_family == UInt8(AF_LINK), let data {
+            let interfaceName = String(cString: current.pointee.ifa_name)
+            if interfaceName.hasPrefix("en"),
+               current.pointee.ifa_addr.pointee.sa_family == UInt8(AF_LINK), let data {
                 let stats = data.assumingMemoryBound(to: if_data.self).pointee
                 total += UInt64(stats.ifi_ibytes) + UInt64(stats.ifi_obytes)
             }
@@ -447,7 +524,7 @@ final class SystemMonitor: ObservableObject {
         let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
-            return EnergyStatus(batteryPercent: nil, adapterWatts: adapterWatts(), powerSource: "AC power or unavailable", charging: false, lowPowerMode: lowPowerMode)
+            return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "AC power or unavailable", charging: false, lowPowerMode: lowPowerMode)
         }
         for source in sources {
             guard let description = IOPSGetPowerSourceDescription(blob, source)?.takeUnretainedValue() as? [String: Any],
@@ -457,11 +534,32 @@ final class SystemMonitor: ObservableObject {
             let maximum = (description[kIOPSMaxCapacityKey as String] as? NSNumber)?.doubleValue
             let percent: Double? = if let current, let maximum, maximum > 0 { current / maximum * 100 } else { nil }
             let charging = description[kIOPSIsChargingKey as String] as? Bool ?? false
+            let maximumCapacity = readBatteryMaximumCapacity()
+            let batteryHealth = maximumCapacity.map { "\($0)%" }
             let state = IOPSGetProvidingPowerSourceType(blob)?.takeRetainedValue() as? String
-            return EnergyStatus(batteryPercent: percent, adapterWatts: adapterWatts(), powerSource: state == kIOPSBatteryPowerValue ? "Battery" : "Power adapter",
+            return EnergyStatus(batteryPercent: percent, batteryHealth: batteryHealth, cycleCount: readBatteryCycleCount(), adapterWatts: adapterWatts(), powerSource: state == kIOPSBatteryPowerValue ? "Battery" : "Power adapter",
                                 charging: charging, lowPowerMode: lowPowerMode)
         }
-        return EnergyStatus(batteryPercent: nil, adapterWatts: adapterWatts(), powerSource: "Power adapter", charging: false, lowPowerMode: lowPowerMode)
+        return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "Power adapter", charging: false, lowPowerMode: lowPowerMode)
+    }
+
+    private static func readBatteryCycleCount() -> Int? {
+        guard let matching = IOServiceMatching("AppleSmartBattery") else { return nil }
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        guard let property = IORegistryEntryCreateCFProperty(service, "CycleCount" as CFString, kCFAllocatorDefault, 0) else { return nil }
+        return (property.takeRetainedValue() as? NSNumber)?.intValue
+    }
+
+    private static func readBatteryMaximumCapacity() -> Int? {
+        guard let matching = IOServiceMatching("AppleSmartBattery") else { return nil }
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        guard let property = IORegistryEntryCreateCFProperty(service, "MaxCapacity" as CFString, kCFAllocatorDefault, 0) else { return nil }
+        let capacity = (property.takeRetainedValue() as? NSNumber)?.intValue
+        return capacity.flatMap { (0...100).contains($0) ? $0 : nil }
     }
 
     private static func adapterWatts() -> Double? {
@@ -537,11 +635,8 @@ struct ContentView: View {
     private var chartSurface: Color { isDark ? Color(red: 0.12, green: 0.13, blue: 0.15) : Color(red: 0.995, green: 0.997, blue: 1) }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            Rectangle().fill(hairline).frame(width: 1)
+        ZStack(alignment: .leading) {
             VStack(spacing: 0) {
-                titleBar
                 switch page {
                 case .summary: summaryPage
                 case .performance: performancePage
@@ -552,19 +647,25 @@ struct ContentView: View {
                 case .users: usersPage
                 }
             }
+            .padding(.leading, 205)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.regularMaterial)
             .background(surface.opacity(0.78))
+
+            sidebar
+                .padding(.leading, 8)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .zIndex(2)
         }
         .frame(minWidth: 840, minHeight: 600)
-        .padding(.top, 24)
         .background {
             ZStack {
                 surface
                 RadialGradient(colors: [Color.purple.opacity(isDark ? 0.19 : 0.10), .clear], center: .topLeading, startRadius: 20, endRadius: 620)
                 RadialGradient(colors: [Color.blue.opacity(isDark ? 0.12 : 0.07), .clear], center: .bottomTrailing, startRadius: 10, endRadius: 560)
             }
-            .ignoresSafeArea()
         }
         .foregroundStyle(ink)
         .onAppear { startupItems = readStartupItems() }
@@ -585,55 +686,38 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Page.allCases) { item in
-                navButton(item.rawValue, icon: item.icon, selected: page == item) { page = item }
+                navButton(item, selected: page == item) { page = item }
             }
             Spacer(minLength: 12)
-            Text("Updated \(monitor.lastUpdated, style: .time)").font(.system(size: 10)).foregroundStyle(muted)
-                .padding(.horizontal, 18).padding(.bottom, 14)
         }
-        .padding(.top, 18)
+        .padding(.top, 48)
         .frame(width: 195)
-        .background(rail.opacity(isDark ? 0.32 : 0.42))
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .trailing) { Rectangle().fill(hairline.opacity(0.7)).frame(width: 1) }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(rail.opacity(isDark ? 0.38 : 0.48), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(isDark ? 0.11 : 0.24), lineWidth: 0.75)
+                .allowsHitTesting(false)
+        }
     }
 
-    private func navButton(_ title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func navButton(_ item: Page, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 15) {
-                Image(systemName: icon).font(.system(size: 16)).frame(width: 20)
-                Text(title).font(.system(size: 14, weight: selected ? .semibold : .regular))
-                Spacer()
+            HStack(spacing: 14) {
+                Image(systemName: item.icon).font(.system(size: 16)).frame(width: 20)
+                Text(item.rawValue).font(.system(size: 14, weight: selected ? .semibold : .regular))
+                Spacer(minLength: 0)
             }
             .foregroundStyle(selected ? (isDark ? Color(red: 0.94, green: 0.79, blue: 0.97) : Color(red: 0.35, green: 0.19, blue: 0.37)) : ink)
-            .padding(.horizontal, 15).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-            .background(selected ? Color.purple.opacity(isDark ? 0.15 : 0.08) : .clear, in: RoundedRectangle(cornerRadius: 10))
-            .contentShape(Rectangle())
-            .modifier(AdaptiveLiquidGlass(enabled: selected, cornerRadius: 10))
-        }.buttonStyle(.plain).padding(.horizontal, 9).padding(.vertical, 2).contentShape(Rectangle())
-    }
-
-    private var titleBar: some View {
-        HStack {
-            Text(page.rawValue).font(.system(size: 17, weight: .semibold))
-            Spacer()
-            if page == .performance {
-                Text("\(monitor.processes.count) processes").font(.system(size: 11)).foregroundStyle(muted)
-            } else if page == .processes {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(muted)
-                    TextField("Search by name, PID, or user", text: $query).textFieldStyle(.plain).frame(width: 220)
-                }.font(.system(size: 12)).padding(9).background(cardFill, in: RoundedRectangle(cornerRadius: 6))
-                Button(role: .destructive) { showTerminateConfirm = true } label: {
-                    Label("End task", systemImage: "stop.fill").font(.system(size: 12, weight: .medium))
-                }
-                .disabled(selectedProcess == nil || selectedProcess?.pid == getpid())
-                .help("Select a process, then end it")
-            }
+            .padding(.horizontal, 14).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .background(selected ? Color.purple.opacity(isDark ? 0.17 : 0.09) : .clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
-        .padding(.leading, 21).padding(.trailing, 17).frame(height: 57)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Rectangle().fill(hairline).frame(height: 1) }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .contentShape(Rectangle())
     }
 
     private var performancePage: some View {
@@ -711,7 +795,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 13) {
                     summaryMetric("CPU", String(format: "%.1f%%", monitor.cpuUsage), "Utilization", .cyan, monitor.cpuHistory)
-                    summaryMetric("Memory", percentUsed, "\(bytes(monitor.memoryUsed)) in use", .purple, monitor.memoryHistory)
+                    summaryMetric("Memory", percentUsed, "\(bytes(monitor.memoryUsed)) in use", .purple, monitor.memoryHistory, fixedMaximum: 100)
                     summaryMetric("Network", rate(monitor.networkRate), "Current throughput", .green, monitor.networkHistory)
                 }
                 Text("Your device").font(.system(size: 17, weight: .semibold))
@@ -719,7 +803,7 @@ struct ContentView: View {
                     informationCard("Model", monitor.hardware.model, "laptopcomputer")
                     informationCard("Processor", monitor.hardware.chip, "cpu")
                     informationCard("Installed memory", bytes(monitor.hardware.memory), "memorychip")
-                    informationCard("Processors", "\(monitor.hardware.cores) logical processors", "square.stack.3d.up")
+                    informationCard("CPU cores", "\(monitor.hardware.physicalCores) cores · \(monitor.hardware.cores) logical processors", "square.stack.3d.up")
                     informationCard("Operating system", monitor.hardware.macOS, "apple.logo")
                     informationCard("Uptime", duration(monitor.uptime), "clock")
                 }
@@ -736,8 +820,12 @@ struct ContentView: View {
                     systemSection("Hardware") {
                         detail("Model identifier", monitor.hardware.model)
                         detail("Chip / processor", monitor.hardware.chip)
+                        detail("CPU cores", "\(monitor.hardware.physicalCores) physical · \(monitor.hardware.cores) logical")
                         detail("Logical processors", "\(monitor.hardware.cores)")
                         detail("Physical memory", bytes(monitor.hardware.memory))
+                        detail("Memory vendor", monitor.hardware.memoryVendor)
+                        detail("Memory type", monitor.hardware.memoryType)
+                        detail("GPU cores", monitor.hardware.gpuCores)
                     }
                     systemSection("macOS") {
                         detail("Version", monitor.hardware.macOS)
@@ -913,12 +1001,12 @@ struct ContentView: View {
         #endif
     }
 
-    private func summaryMetric(_ title: String, _ value: String, _ detail: String, _ color: Color, _ samples: [Sample]) -> some View {
+    private func summaryMetric(_ title: String, _ value: String, _ detail: String, _ color: Color, _ samples: [Sample], fixedMaximum: Double? = nil) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.7).foregroundStyle(muted)
             Text(value).font(.system(size: 22, weight: .semibold, design: .rounded))
             Text(detail).font(.system(size: 10)).foregroundStyle(muted).lineLimit(1)
-            MiniChart(samples: samples, color: color).frame(height: 38)
+            MiniChart(samples: samples, color: color, fixedMaximum: fixedMaximum).frame(height: 38)
         }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
             .background(cardFill, in: RoundedRectangle(cornerRadius: 9))
             .modifier(AdaptiveLiquidGlass(enabled: true, cornerRadius: 12))
@@ -980,7 +1068,7 @@ struct ContentView: View {
                     if item == .cpu { Text(String(format: "%.0f%% utilization", monitor.cpuUsage)).font(.system(size: 10)).foregroundStyle(muted) }
                 }
                 Spacer(minLength: 0)
-                MiniChart(samples: samples(item), color: item.color).frame(width: 72, height: 41)
+                MiniChart(samples: samples(item), color: item.color, fixedMaximum: item == .memory ? 100 : nil).frame(width: 72, height: 41)
             }
             .padding(.horizontal, 11).padding(.vertical, 10).frame(maxWidth: .infinity, minHeight: 82)
             .background(selected ? Color.purple.opacity(isDark ? 0.10 : 0.055) : .clear, in: RoundedRectangle(cornerRadius: 11))
@@ -1000,7 +1088,7 @@ struct ContentView: View {
         }
         .chartYScale(domain: 0...([.cpu, .gpu, .memory].contains(resource) ? 100 : max((series.map(\.value).max() ?? 1) * 1.15, 1)))
         .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
-            AxisValueLabel { if let n = value.as(Double.self) { Text([.network, .disk].contains(resource) ? String(format: "%.1f Mbps", n) : ([.cpu, .gpu, .energy].contains(resource) ? String(format: "%.0f%%", n) : String(format: "%.0f", n))).font(.system(size: 10)).foregroundStyle(muted) } }
+            AxisValueLabel { if let n = value.as(Double.self) { Text([.network, .disk].contains(resource) ? bitRateLabel(n * 1_000_000) : ([.cpu, .gpu, .energy].contains(resource) ? String(format: "%.0f%%", n) : String(format: "%.0f", n))).font(.system(size: 10)).foregroundStyle(muted) } }
             AxisGridLine().foregroundStyle(hairline)
         } }
         .chartXAxis { AxisMarks(values: .automatic(desiredCount: 7)) { _ in AxisGridLine().foregroundStyle(hairline) } }
@@ -1018,7 +1106,7 @@ struct ContentView: View {
             }
             VStack(alignment: .leading, spacing: 12) {
                 detail("Base speed", "—")
-                detail("Cores", "\(ProcessInfo.processInfo.activeProcessorCount)")
+                detail("CPU cores", "\(monitor.hardware.physicalCores)")
                 detail("Logical processors", "\(monitor.hardware.cores)")
                 detail("Virtualization", "Available")
                 detail("macOS", monitor.hardware.macOS)
@@ -1033,6 +1121,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 12) {
                 detail("Available", bytes(monitor.hardware.memory > monitor.memoryUsed ? monitor.hardware.memory - monitor.memoryUsed : 0))
                 detail("Installed", bytes(monitor.hardware.memory))
+                detail("Vendor", monitor.hardware.memoryVendor)
+                detail("Memory type", monitor.hardware.memoryType)
                 detail("Memory pressure", "See Activity Monitor")
             }
         }.padding(.top, 4)
@@ -1074,6 +1164,7 @@ struct ContentView: View {
             stat("Utilization", monitor.gpuUsage.map { String(format: "%.0f%%", $0) } ?? "Unavailable", large: true)
             VStack(alignment: .leading, spacing: 12) {
                 detail("Graphics processor", MTLCreateSystemDefaultDevice()?.name ?? "Not detected")
+                detail("GPU cores", monitor.hardware.gpuCores)
                 detail("Memory", "Shared system memory")
                 detail("Data source", "IORegistry performance counters")
             }
@@ -1086,6 +1177,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 12) {
                 detail("Power source", monitor.energyStatus.powerSource)
                 detail("Charging", monitor.energyStatus.charging ? "Yes" : "No")
+                detail("Battery health", monitor.energyStatus.batteryHealth ?? "Unavailable")
+                detail("Battery cycle count", monitor.energyStatus.cycleCount.map(String.init) ?? "Unavailable")
                 detail("Charger wattage", monitor.energyStatus.adapterWatts.map { String(format: "%.0f W adapter rating", $0) } ?? "Unavailable")
                 detail("Low Power Mode", monitor.energyStatus.lowPowerMode ? "On" : "Off")
             }
@@ -1094,6 +1187,29 @@ struct ContentView: View {
 
     private var processesPage: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("\(filteredProcesses.count) processes")
+                    .font(.system(size: 11)).foregroundStyle(muted)
+                Spacer()
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(muted)
+                    TextField("Search by name, PID, or user", text: $query)
+                        .textFieldStyle(.plain)
+                        .frame(width: 220)
+                }
+                .font(.system(size: 12))
+                .padding(9)
+                .background(cardFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Button(role: .destructive) { showTerminateConfirm = true } label: {
+                    Label("End task", systemImage: "stop.fill")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .disabled(selectedProcess == nil || selectedProcess?.pid == getpid())
+                .help("Select a process, then end it")
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
             HStack {
                 processSortHeader("NAME", column: .name, width: nil, alignment: .leading)
                 processSortHeader("PID", column: .pid, width: 70, alignment: .trailing)
@@ -1111,7 +1227,9 @@ struct ContentView: View {
                 }
             }
             HStack {
-                Text("\(filteredProcesses.count) processes").font(.system(size: 11)).foregroundStyle(muted)
+                Text("Select a process to end it")
+                    .font(.system(size: 11)).foregroundStyle(muted)
+                Spacer()
             }.padding(14).overlay(alignment: .top) { Rectangle().fill(hairline).frame(height: 1) }
         }.background(surface)
     }
@@ -1206,9 +1324,11 @@ struct ContentView: View {
     private var percentUsed: String { String(format: "%.1f%%", Double(monitor.memoryUsed) / max(Double(monitor.hardware.memory), 1) * 100) }
     private func bytes(_ value: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(clamping: value), countStyle: .memory) }
     private func rate(_ value: Double) -> String {
-        let bitsPerSecond = value * 8
+        bitRateLabel(value * 8)
+    }
+    private func bitRateLabel(_ bitsPerSecond: Double) -> String {
         if bitsPerSecond >= 1_000_000_000 { return String(format: "%.2f Gbps", bitsPerSecond / 1_000_000_000) }
-        if bitsPerSecond >= 1_000_000 { return String(format: "%.2f Mbps", bitsPerSecond / 1_000_000) }
+        if bitsPerSecond >= 1_000_000 { return String(format: "%.1f Mbps", bitsPerSecond / 1_000_000) }
         if bitsPerSecond >= 1_000 { return String(format: "%.1f Kbps", bitsPerSecond / 1_000) }
         return String(format: "%.0f bps", bitsPerSecond)
     }
@@ -1255,6 +1375,7 @@ private struct AdaptiveLiquidGlass: ViewModifier {
 struct MiniChart: View {
     let samples: [Sample]
     let color: Color
+    var fixedMaximum: Double? = nil
     var body: some View {
         Chart(samples) { sample in
             AreaMark(x: .value("Time", sample.time), y: .value("Usage", sample.value))
@@ -1265,6 +1386,6 @@ struct MiniChart: View {
                 .interpolationMethod(.catmullRom)
         }
         .chartXAxis(.hidden).chartYAxis(.hidden)
-        .chartYScale(domain: 0...(max(samples.map(\.value).max() ?? 1, 1)))
+        .chartYScale(domain: 0...(fixedMaximum ?? max(samples.map(\.value).max() ?? 1, 1)))
     }
 }
