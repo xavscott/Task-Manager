@@ -13,11 +13,14 @@ import Metal
 struct MacTaskManagerApp: App {
     @NSApplicationDelegateAdaptor(AppLifecycleDelegate.self) private var appLifecycleDelegate
     @StateObject private var monitor = SystemMonitor()
+    @StateObject private var displayTheme = DisplayThemeStore()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(monitor)
+                .environmentObject(displayTheme)
+                .preferredColorScheme(displayTheme.preferredColorScheme)
                 .frame(width: 1080, height: 768)
                 .background(FixedSizeWindowConfigurator())
         }
@@ -31,6 +34,84 @@ struct MacTaskManagerApp: App {
                     .keyboardShortcut("r", modifiers: .command)
             }
         }
+
+        Settings {
+            DisplaySettingsView()
+                .environmentObject(displayTheme)
+                .preferredColorScheme(displayTheme.preferredColorScheme)
+                .frame(width: 660, height: 400)
+        }
+        .windowResizability(.contentSize)
+    }
+}
+
+private enum DisplayAppearance: String, CaseIterable, Identifiable {
+    case system = "Auto"
+    case light = "Light"
+    case dark = "Dark"
+    var id: String { rawValue }
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
+private enum AccentChoice: String, CaseIterable, Identifiable {
+    case multicolor, blue, purple, pink, red, orange, yellow, green, gray
+    var id: String { rawValue }
+    var title: String { self == .multicolor ? "Multicolor" : rawValue.capitalized }
+    var darkColor: Color {
+        switch self {
+        case .multicolor, .blue: Color(red: 0.38, green: 0.65, blue: 0.96)
+        case .purple: Color(red: 0.69, green: 0.53, blue: 0.91)
+        case .pink: Color(red: 0.91, green: 0.48, blue: 0.68)
+        case .red: Color(red: 0.96, green: 0.34, blue: 0.37)
+        case .orange: Color(red: 0.94, green: 0.59, blue: 0.31)
+        case .yellow: Color(red: 0.94, green: 0.75, blue: 0.18)
+        case .green: Color(red: 0.34, green: 0.70, blue: 0.43)
+        case .gray: Color(red: 0.62, green: 0.64, blue: 0.67)
+        }
+    }
+    var lightColor: Color {
+        switch self {
+        case .multicolor, .blue: Color(red: 0.12, green: 0.39, blue: 0.78)
+        case .purple: Color(red: 0.43, green: 0.27, blue: 0.68)
+        case .pink: Color(red: 0.72, green: 0.24, blue: 0.45)
+        case .red: Color(red: 0.78, green: 0.12, blue: 0.16)
+        case .orange: Color(red: 0.73, green: 0.34, blue: 0.08)
+        case .yellow: Color(red: 0.58, green: 0.43, blue: 0.02)
+        case .green: Color(red: 0.18, green: 0.49, blue: 0.27)
+        case .gray: Color(red: 0.38, green: 0.40, blue: 0.43)
+        }
+    }
+}
+
+@MainActor
+private final class DisplayThemeStore: ObservableObject {
+    @Published var appearance: DisplayAppearance {
+        didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "displayAppearance") }
+    }
+    @Published var accentChoice: AccentChoice {
+        didSet { UserDefaults.standard.set(accentChoice.rawValue, forKey: "displayAccentV2") }
+    }
+    private let originalIcon: NSImage
+    var iconImage: NSImage { originalIcon }
+
+    var preferredColorScheme: ColorScheme? { appearance.colorScheme }
+    func accent(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? accentChoice.darkColor : accentChoice.lightColor
+    }
+
+    init() {
+        let defaults = UserDefaults.standard
+        appearance = DisplayAppearance(rawValue: defaults.string(forKey: "displayAppearance") ?? "System") ?? .system
+        // Start this display-theme revision with the brand green instead of carrying forward
+        // the earlier purple selection; future changes persist under the new preference key.
+        accentChoice = AccentChoice(rawValue: defaults.string(forKey: "displayAccentV2") ?? "green") ?? .green
+        originalIcon = NSApp.applicationIconImage.copy() as? NSImage ?? NSImage(size: NSSize(width: 128, height: 128))
     }
 }
 
@@ -782,6 +863,7 @@ enum PerformanceResource: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject private var monitor: SystemMonitor
+    @EnvironmentObject private var displayTheme: DisplayThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var page: Page = .performance
     @State private var resource: PerformanceResource = .cpu
@@ -794,10 +876,7 @@ struct ContentView: View {
     @State private var startupItems: [StartupItem] = []
 
     private var isDark: Bool { colorScheme == .dark }
-    // A restrained green tint that keeps the app's brand color readable in both appearances.
-    private var accent: Color {
-        isDark ? Color(red: 0.34, green: 0.70, blue: 0.43) : Color(red: 0.18, green: 0.49, blue: 0.27)
-    }
+    private var accent: Color { displayTheme.accent(for: colorScheme) }
     private var ink: Color { isDark ? .white : Color(red: 0.11, green: 0.12, blue: 0.14) }
     private var muted: Color { isDark ? Color.white.opacity(0.66) : Color(red: 0.38, green: 0.40, blue: 0.43) }
     private var rail: Color { isDark ? Color(red: 0.12, green: 0.13, blue: 0.15) : Color(red: 0.95, green: 0.96, blue: 0.97) }
@@ -903,7 +982,6 @@ struct ContentView: View {
             .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 12)
             .frame(width: 260)
             .background(panel)
-            Rectangle().fill(hairline).frame(width: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(alignment: .firstTextBaseline) {
@@ -1552,6 +1630,152 @@ struct ContentView: View {
             Text(title).font(.system(size: 12)).foregroundStyle(muted).frame(width: 150, alignment: .leading)
             Text(value).font(.system(size: 12)).foregroundStyle(ink)
         }
+    }
+}
+
+private struct DisplaySettingsView: View {
+    @EnvironmentObject private var theme: DisplayThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    private var accent: Color { theme.accent(for: colorScheme) }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [accent.opacity(colorScheme == .dark ? 0.16 : 0.08), .clear],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .zIndex(0)
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Theme").font(.system(size: 22, weight: .semibold))
+
+                VStack(spacing: 0) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("Appearance")
+                            .font(.system(size: 15, weight: .medium))
+                            .frame(width: 112, alignment: .leading)
+                        HStack(spacing: 8) {
+                            ForEach(DisplayAppearance.allCases) { option in
+                                appearanceOption(option)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 15)
+
+                    Divider()
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("Color")
+                            .font(.system(size: 15, weight: .medium))
+                            .frame(width: 112, alignment: .leading)
+                        HStack(spacing: 5) {
+                            ForEach(AccentChoice.allCases) { choice in
+                                accentOption(choice)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 12)
+                }
+                .padding(.horizontal, 17)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .modifier(AdaptiveLiquidGlass(enabled: true, cornerRadius: 18))
+                .zIndex(2)
+
+                Spacer(minLength: 0)
+            }
+            .padding(24)
+            .zIndex(1)
+        }
+        .frame(width: 660, height: 400)
+        .background(.regularMaterial)
+        .tint(accent)
+    }
+
+    private func appearanceOption(_ option: DisplayAppearance) -> some View {
+        let selected = theme.appearance == option
+        return Button {
+            theme.appearance = option
+        } label: {
+            VStack(spacing: 5) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(LinearGradient(colors: [Color(red: 0.18, green: 0.59, blue: 0.86), Color(red: 0.10, green: 0.28, blue: 0.60)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    if option == .system {
+                        previewWindow(dark: false)
+                            .frame(width: 67, height: 43)
+                            .offset(x: -13, y: -5)
+                            .zIndex(1)
+                        previewWindow(dark: true)
+                            .frame(width: 67, height: 43)
+                            .offset(x: 13, y: 5)
+                            .zIndex(2)
+                    } else {
+                        previewWindow(dark: option == .dark)
+                            .frame(width: 75, height: 48)
+                    }
+                }
+                .frame(width: 100, height: 60)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(selected ? accent : Color.white.opacity(0.18), lineWidth: selected ? 2.5 : 0.8)
+                }
+                Text(option.rawValue)
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? accent : .secondary)
+            }
+            .frame(width: 106, height: 85)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(option.rawValue) appearance")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func previewWindow(dark: Bool) -> some View {
+        VStack(spacing: 3) {
+            HStack(spacing: 3) {
+                Circle().fill(Color(red: 1, green: 0.34, blue: 0.31))
+                Circle().fill(Color(red: 1, green: 0.75, blue: 0.20))
+                Circle().fill(Color(red: 0.20, green: 0.78, blue: 0.33))
+                Spacer(minLength: 0)
+            }
+            .frame(height: 5)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(accent.opacity(0.72))
+                .frame(height: 7)
+            Spacer(minLength: 0)
+        }
+        .padding(4)
+        .background(dark ? Color(red: 0.12, green: 0.14, blue: 0.20) : Color.white, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.black.opacity(0.16), lineWidth: 0.6))
+        .shadow(color: .black.opacity(0.24), radius: 3, y: 2)
+    }
+
+    private func accentOption(_ choice: AccentChoice) -> some View {
+        let selected = theme.accentChoice == choice
+        return Button {
+            theme.accentChoice = choice
+        } label: {
+            Circle()
+                .fill(choice == .multicolor
+                    ? AnyShapeStyle(AngularGradient(colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .pink, .red], center: .center))
+                    : AnyShapeStyle(colorScheme == .dark ? choice.darkColor : choice.lightColor))
+                .frame(width: 31, height: 31)
+                .overlay {
+                    if selected {
+                        Circle().stroke(colorScheme == .dark ? Color.white.opacity(0.9) : Color.black.opacity(0.78), lineWidth: 1.5)
+                            .padding(4)
+                    }
+                }
+                .frame(width: 39, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(choice.title) theme color")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
