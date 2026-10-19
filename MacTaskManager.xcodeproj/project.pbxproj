@@ -1,0 +1,78 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* main.swift */; };
+		A10000000000000000000002 /* MacTaskManagerWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* MacTaskManagerWidget.swift */; };
+		A10000000000000000000003 /* MacTaskManagerWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* MacTaskManagerWidgetExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A30000000000000000000001 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A40000000000000000000001 /* Project object */; proxyType = 1; remoteGlobalIDString = A50000000000000000000002; remoteInfo = MacTaskManagerWidgetExtension; };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A60000000000000000000001 /* Embed App Extensions */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (A10000000000000000000003 /* MacTaskManagerWidgetExtension.appex in Embed App Extensions */, ); name = "Embed App Extensions"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MacTaskManager/main.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* MacTaskManagerWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MacTaskManagerWidget/MacTaskManagerWidget.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* MacTaskManager.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "MacTaskManager.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000004 /* MacTaskManagerWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = MacTaskManagerWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A70000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A80000000000000000000001 = {isa = PBXGroup; children = (A20000000000000000000001 /* main.swift */, A20000000000000000000002 /* MacTaskManagerWidget.swift */, A80000000000000000000002 /* Products */, ); sourceTree = "<group>"; };
+		A80000000000000000000002 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000003 /* MacTaskManager.app */, A20000000000000000000004 /* MacTaskManagerWidgetExtension.appex */, ); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* MacTaskManager */ = {isa = PBXNativeTarget; buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXNativeTarget "MacTaskManager" */; buildPhases = (A70000000000000000000001 /* Frameworks */, A10000000000000000000010 /* Sources */, A60000000000000000000001 /* Embed App Extensions */, ); buildRules = (); dependencies = (AA00000000000000000001 /* PBXTargetDependency */, ); name = MacTaskManager; productName = MacTaskManager; productReference = A20000000000000000000003 /* MacTaskManager.app */; productType = "com.apple.product-type.application"; };
+		A50000000000000000000002 /* MacTaskManagerWidgetExtension */ = {isa = PBXNativeTarget; buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget "MacTaskManagerWidgetExtension" */; buildPhases = (A70000000000000000000002 /* Frameworks */, A10000000000000000000011 /* Sources */, ); buildRules = (); dependencies = (); name = MacTaskManagerWidgetExtension; productName = MacTaskManagerWidgetExtension; productReference = A20000000000000000000004 /* MacTaskManagerWidgetExtension.appex */; productType = "com.apple.product-type.app-extension"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A40000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 2700; TargetAttributes = {A50000000000000000000001 = {CreatedOnToolsVersion = 27.0; }; A50000000000000000000002 = {CreatedOnToolsVersion = 27.0; }; }; }; buildConfigurationList = A90000000000000000000003 /* Build configuration list for PBXProject "MacTaskManager" */; compatibilityVersion = "Xcode 15.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = A80000000000000000000001; productRefGroup = A80000000000000000000002 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001 /* MacTaskManager */, A50000000000000000000002 /* MacTaskManagerWidgetExtension */, ); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AB00000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		AB00000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000010 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* main.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000011 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000002 /* MacTaskManagerWidget.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AA00000000000000000001 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A50000000000000000000002 /* MacTaskManagerWidgetExtension */; targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		AC00000000000000000001 /* Debug app */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Mac Task Manager"; INFOPLIST_KEY_CFBundleIconFile = AppIcon; INFOPLIST_KEY_CFBundleShortVersionString = 1.0; INFOPLIST_KEY_CFBundleVersion = 5; CURRENT_PROJECT_VERSION = 5; VERSIONING_SYSTEM = "apple-generic"; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Mac Task Manager uses Bluetooth to show connected Apple accessories and details macOS provides, such as the device name, model, and battery level."; MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; PRODUCT_BUNDLE_IDENTIFIER = com.codex.mactaskmanager; PRODUCT_NAME = MacTaskManager; SWIFT_VERSION = 6.0; }; name = Debug; };
+		AC00000000000000000002 /* Release app */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Mac Task Manager"; INFOPLIST_KEY_CFBundleIconFile = AppIcon; INFOPLIST_KEY_CFBundleShortVersionString = 1.0; INFOPLIST_KEY_CFBundleVersion = 5; CURRENT_PROJECT_VERSION = 5; VERSIONING_SYSTEM = "apple-generic"; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Mac Task Manager uses Bluetooth to show connected Apple accessories and details macOS provides, such as the device name, model, and battery level."; MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; PRODUCT_BUNDLE_IDENTIFIER = com.codex.mactaskmanager; PRODUCT_NAME = MacTaskManager; SWIFT_VERSION = 6.0; }; name = Release; };
+		AC00000000000000000003 /* Debug widget */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/MacTaskManagerWidget/Info.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; PRODUCT_BUNDLE_IDENTIFIER = com.codex.mactaskmanager.widget; PRODUCT_NAME = MacTaskManagerWidgetExtension; SKIP_INSTALL = YES; SWIFT_VERSION = 6.0; }; name = Debug; };
+		AC00000000000000000004 /* Release widget */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/MacTaskManagerWidget/Info.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; PRODUCT_BUNDLE_IDENTIFIER = com.codex.mactaskmanager.widget; PRODUCT_NAME = MacTaskManagerWidgetExtension; SKIP_INSTALL = YES; SWIFT_VERSION = 6.0; }; name = Release; };
+		AC00000000000000000005 /* Debug project */ = {isa = XCBuildConfiguration; buildSettings = {MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		AC00000000000000000006 /* Release project */ = {isa = XCBuildConfiguration; buildSettings = {MACOSX_DEPLOYMENT_TARGET = 14.0; OTHER_SWIFT_FLAGS = "-parse-as-library"; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A90000000000000000000001 /* Build configuration list for PBXNativeTarget "MacTaskManager" */ = {isa = XCConfigurationList; buildConfigurations = (AC00000000000000000001 /* Debug app */, AC00000000000000000002 /* Release app */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A90000000000000000000002 /* Build configuration list for PBXNativeTarget "MacTaskManagerWidgetExtension" */ = {isa = XCConfigurationList; buildConfigurations = (AC00000000000000000003 /* Debug widget */, AC00000000000000000004 /* Release widget */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A90000000000000000000003 /* Build configuration list for PBXProject "MacTaskManager" */ = {isa = XCConfigurationList; buildConfigurations = (AC00000000000000000005 /* Debug project */, AC00000000000000000006 /* Release project */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A40000000000000000000001 /* Project object */;
+}

@@ -4,12 +4,12 @@ A native SwiftUI system monitor inspired by Windows Task Manager. It shows Mac h
 
 ## Build
 
-Requires macOS 14 or later and Xcode command-line tools.
+Requires macOS 14 or later and Xcode command-line tools. The Xcode project includes the WidgetKit extension; use it to build the app with its widget.
 
 ```sh
-swift build -c release
+./package-dmg.sh
 ```
 
-To create the app bundle and disk image on macOS, run `./package-dmg.sh`.
+Install the app from the generated disk image and launch it once. The “Mac Task Manager” widget will then be available from the macOS widget gallery. Widget refresh timing is managed by macOS.
 
 Process data is read using macOS system APIs. macOS may hide details for protected processes; ending a process may require administrator permissions. Network throughput is measured from interface byte counters.

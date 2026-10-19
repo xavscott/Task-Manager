@@ -8,6 +8,7 @@ import IOBluetooth
 import ObjectiveC.runtime
 import AppKit
 import Metal
+import WidgetKit
 
 @main
 struct MacTaskManagerApp: App {
@@ -39,7 +40,7 @@ struct MacTaskManagerApp: App {
             DisplaySettingsView()
                 .environmentObject(displayTheme)
                 .preferredColorScheme(displayTheme.preferredColorScheme)
-                .frame(width: 660, height: 400)
+                .frame(width: 660, height: 520)
         }
         .windowResizability(.contentSize)
     }
@@ -115,6 +116,44 @@ private final class DisplayThemeStore: ObservableObject {
     }
 }
 
+@MainActor
+private final class FloatingPerformanceOverlayController: ObservableObject {
+    private var panel: NSPanel?
+
+    func show(monitor: SystemMonitor) {
+        if let panel {
+            panel.orderFrontRegardless()
+            return
+        }
+
+        let size = NSSize(width: 310, height: 230)
+        let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let origin = NSPoint(x: visibleFrame.maxX - size.width - 24, y: visibleFrame.maxY - size.height - 28)
+        let overlay = NSPanel(
+            contentRect: NSRect(origin: origin, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        overlay.isFloatingPanel = true
+        overlay.level = .statusBar
+        overlay.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        overlay.backgroundColor = .clear
+        overlay.isOpaque = false
+        overlay.hasShadow = true
+        overlay.isMovableByWindowBackground = true
+        overlay.hidesOnDeactivate = false
+        overlay.contentView = NSHostingView(rootView: FloatingPerformanceOverlayView(monitor: monitor))
+        overlay.orderFrontRegardless()
+        panel = overlay
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+        panel = nil
+    }
+}
+
 private struct FixedSizeWindowConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = FixedSizeWindowView()
@@ -143,6 +182,10 @@ private final class FixedSizeWindowView: NSView {
 }
 
 private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
@@ -230,14 +273,12 @@ private final class ThermalSensorReader {
     private typealias CopyServices = @convention(c) (UnsafeRawPointer) -> UnsafeMutableRawPointer?
     private typealias CopyEvent = @convention(c) (UnsafeRawPointer, Int64, Int32, Int64) -> UnsafeMutableRawPointer?
     private typealias GetFloatValue = @convention(c) (UnsafeRawPointer, Int32) -> Double
-    private typealias CopyProperty = @convention(c) (UnsafeRawPointer, CFString) -> UnsafeMutableRawPointer?
 
     private let library: UnsafeMutableRawPointer?
     private let client: UnsafeMutableRawPointer?
     private let services: UnsafeMutableRawPointer?
     private let copyEvent: CopyEvent?
     private let getFloatValue: GetFloatValue?
-    private let copyProperty: CopyProperty?
 
     init() {
         library = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY)
@@ -245,7 +286,7 @@ private final class ThermalSensorReader {
               let createSymbol = dlsym(library, "IOHIDEventSystemClientCreate"),
               let matchSymbol = dlsym(library, "IOHIDEventSystemClientSetMatching"),
               let servicesSymbol = dlsym(library, "IOHIDEventSystemClientCopyServices") else {
-            client = nil; services = nil; copyEvent = nil; getFloatValue = nil; copyProperty = nil
+            client = nil; services = nil; copyEvent = nil; getFloatValue = nil
             return
         }
         let createClient = unsafeBitCast(createSymbol, to: CreateClient.self)
@@ -253,7 +294,6 @@ private final class ThermalSensorReader {
         let copyServices = unsafeBitCast(servicesSymbol, to: CopyServices.self)
         copyEvent = dlsym(library, "IOHIDServiceClientCopyEvent").map { unsafeBitCast($0, to: CopyEvent.self) }
         getFloatValue = dlsym(library, "IOHIDEventGetFloatValue").map { unsafeBitCast($0, to: GetFloatValue.self) }
-        copyProperty = dlsym(library, "IOHIDServiceClientCopyProperty").map { unsafeBitCast($0, to: CopyProperty.self) }
         client = createClient(kCFAllocatorDefault)
         if let client {
             let matching = ["PrimaryUsagePage": 0xff00, "PrimaryUsage": 0x0005] as CFDictionary
@@ -270,29 +310,20 @@ private final class ThermalSensorReader {
         if let library { dlclose(library) }
     }
 
-    func averageCPUTemperature() -> Double? {
+    func averageTemperature() -> (name: String, value: Double)? {
         guard let services, let copyEvent, let getFloatValue else { return nil }
         let serviceArray = unsafeBitCast(services, to: CFArray.self)
-        var cpuReadings: [Double] = []
-        var allReadings: [Double] = []
+        var readings: [Double] = []
         for index in 0..<CFArrayGetCount(serviceArray) {
             guard let service = CFArrayGetValueAtIndex(serviceArray, index),
                   let event = copyEvent(service, 15, 0, 0) else { continue }
             let value = getFloatValue(event, Int32(15 << 16))
             Unmanaged<CFTypeRef>.fromOpaque(event).release()
             guard value.isFinite, (10...110).contains(value) else { continue }
-            allReadings.append(value)
-            if let name = copyProperty?(service, "Product" as CFString)
-                .map({ Unmanaged<CFTypeRef>.fromOpaque($0).takeRetainedValue() as? String }) ?? nil {
-                let normalized = name.lowercased()
-                if normalized.contains("pacc mtr temp") || normalized.contains("eacc mtr temp") || normalized.contains("cpu") {
-                    cpuReadings.append(value)
-                }
-            }
+            readings.append(value)
         }
-        let readings = cpuReadings.isEmpty ? allReadings : cpuReadings
         guard !readings.isEmpty else { return nil }
-        return readings.reduce(0, +) / Double(readings.count)
+        return ("Sensor average", readings.reduce(0, +) / Double(readings.count))
     }
 }
 
@@ -404,6 +435,7 @@ final class SystemMonitor: ObservableObject {
     @Published var systemPowerWatts: Double?
     @Published var powerHistory: [Sample] = []
     @Published var thermalTemperature: Double?
+    @Published var thermalSensorLabel = "Sensor average"
     @Published var thermalPressure = "Unknown"
     @Published var thermalHistory: [Sample] = []
     @Published var cpuUsage = 0.0
@@ -457,7 +489,12 @@ final class SystemMonitor: ObservableObject {
         if let battery = energyStatus.batteryPercent { append(battery, to: &batteryHistory, at: now) }
         systemPowerWatts = Self.readSystemPowerWatts()
         if let systemPowerWatts { append(systemPowerWatts, to: &powerHistory, at: now) }
-        thermalTemperature = thermalSensorReader.averageCPUTemperature()
+        if let thermalReading = thermalSensorReader.averageTemperature() {
+            thermalSensorLabel = thermalReading.name
+            thermalTemperature = thermalReading.value
+        } else {
+            thermalTemperature = nil
+        }
         if let thermalTemperature { append(thermalTemperature, to: &thermalHistory, at: now) }
         thermalPressure = Self.thermalPressureLabel(ProcessInfo.processInfo.thermalState)
         previousDate = now
@@ -865,6 +902,8 @@ struct ContentView: View {
     @EnvironmentObject private var monitor: SystemMonitor
     @EnvironmentObject private var displayTheme: DisplayThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("floatingPerformanceOverlay") private var floatingOverlayEnabled = false
+    @StateObject private var floatingOverlay = FloatingPerformanceOverlayController()
     @State private var page: Page = .performance
     @State private var resource: PerformanceResource = .cpu
     @State private var query = ""
@@ -921,7 +960,18 @@ struct ContentView: View {
         }
         .foregroundStyle(ink)
         .tint(accent)
-        .onAppear { startupItems = readStartupItems() }
+        .onAppear {
+            startupItems = readStartupItems()
+            if floatingOverlayEnabled { floatingOverlay.show(monitor: monitor) }
+        }
+        .onChange(of: floatingOverlayEnabled) { _, enabled in
+            if enabled {
+                floatingOverlay.show(monitor: monitor)
+            } else {
+                floatingOverlay.hide()
+            }
+        }
+        .onDisappear { floatingOverlay.hide() }
         .alert("End process?", isPresented: $showTerminateConfirm) {
             Button("Cancel", role: .cancel) { }
             Button("End task", role: .destructive) {
@@ -1032,7 +1082,7 @@ struct ContentView: View {
         case .network: "Network interfaces"
         case .gpu: MTLCreateSystemDefaultDevice()?.name ?? "Graphics processor"
         case .energy: "Live system power"
-        case .thermals: "CPU temperature and thermal pressure"
+        case .thermals: "Average temperature across available sensors and thermal pressure"
         }
     }
 
@@ -1043,7 +1093,7 @@ struct ContentView: View {
         case .disk: "Disk read/write throughput"
         case .network: "Throughput"
         case .energy: "System power draw (W)"
-        case .thermals: "CPU temperature (°C) · thermal pressure"
+        case .thermals: "Temperature (°C) · thermal pressure"
         }
     }
 
@@ -1450,7 +1500,7 @@ struct ContentView: View {
 
     private var thermalsStats: some View {
         HStack(alignment: .top, spacing: 48) {
-            stat("CPU temperature", monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "Unavailable", large: true)
+            stat("\(monitor.thermalSensorLabel) temperature", monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "Unavailable", large: true)
             VStack(alignment: .leading, spacing: 12) {
                 detail("Thermal pressure", monitor.thermalPressure)
                 detail("Sensor source", "Apple temperature sensors")
@@ -1633,9 +1683,95 @@ struct ContentView: View {
     }
 }
 
+private struct FloatingPerformanceOverlayView: View {
+    @ObservedObject var monitor: SystemMonitor
+    @AppStorage("floatingPerformanceOverlay") private var enabled = true
+    @AppStorage("floatingPerformanceOverlayOpacity") private var glassOpacity = 0.68
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 7) {
+                Image(systemName: "waveform.path")
+                    .foregroundStyle(.green)
+                Text("Task Manager Overlay")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Button {
+                    enabled = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close performance overlay")
+            }
+
+            VStack(spacing: 7) {
+                metric("CPU", String(format: "%.1f%%", monitor.cpuUsage), "cpu", .cyan)
+                Divider()
+                metric("GPU", monitor.gpuUsage.map { String(format: "%.1f%%", $0) } ?? "—", "display", .orange)
+                Divider()
+                metric("Memory", memoryValue, "memorychip", .purple)
+                Divider()
+                metric(monitor.thermalSensorLabel, monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "Unavailable", "thermometer.medium", .orange)
+                Divider()
+                metric("Power", monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "—", "bolt", .yellow)
+            }
+        }
+        .padding(14)
+        .frame(width: 310, height: 230)
+        .modifier(PerformanceOverlayGlass(opacity: glassOpacity, cornerRadius: 17))
+    }
+
+    private var memoryValue: String {
+        let used = ByteCountFormatter.string(fromByteCount: Int64(clamping: monitor.memoryUsed), countStyle: .memory)
+        let total = ByteCountFormatter.string(fromByteCount: Int64(clamping: monitor.hardware.memory), countStyle: .memory)
+        let percent = Double(monitor.memoryUsed) / max(Double(monitor.hardware.memory), 1) * 100
+        return String(format: "%.0f%% · %@ / %@", percent, used, total)
+    }
+
+    private func metric(_ title: String, _ value: String, _ symbol: String, _ color: Color) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(color)
+                .frame(width: 15)
+            Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(value).font(.system(size: 12, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .frame(height: 19)
+    }
+}
+
+private struct PerformanceOverlayGlass: ViewModifier {
+    let opacity: Double
+    let cornerRadius: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(macOS 26.0, *) {
+            content
+                .background(Color.white.opacity(opacity * 0.035), in: shape)
+                .glassEffect(.regular.tint(Color.white.opacity(opacity * 0.16)).interactive(), in: shape)
+                .overlay(shape.strokeBorder(.white.opacity(0.14 + opacity * 0.08), lineWidth: 0.8))
+        } else {
+            content
+                .background(.ultraThinMaterial.opacity(opacity), in: shape)
+                .overlay(shape.strokeBorder(.white.opacity(0.14 + opacity * 0.08), lineWidth: 0.8))
+        }
+    }
+}
+
 private struct DisplaySettingsView: View {
     @EnvironmentObject private var theme: DisplayThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("floatingPerformanceOverlay") private var floatingOverlayEnabled = false
+    @AppStorage("floatingPerformanceOverlayOpacity") private var floatingOverlayOpacity = 0.68
     private var accent: Color { theme.accent(for: colorScheme) }
 
     var body: some View {
@@ -1677,6 +1813,39 @@ private struct DisplaySettingsView: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.vertical, 12)
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Fullscreen performance overlay")
+                                .font(.system(size: 14, weight: .medium))
+                            Text("Show live system stats above fullscreen apps when supported.")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        Toggle("", isOn: $floatingOverlayEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .accessibilityLabel("Fullscreen performance overlay")
+                    }
+                    .padding(.vertical, 12)
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        Text("Glass opacity")
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: 112, alignment: .leading)
+                        Slider(value: $floatingOverlayOpacity, in: 0.35...1.0, step: 0.05)
+                            .accessibilityLabel("Floating overlay glass opacity")
+                        Text("\(Int(floatingOverlayOpacity * 100))%")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                            .frame(width: 38, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 12)
                 }
                 .padding(.horizontal, 17)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1688,7 +1857,7 @@ private struct DisplaySettingsView: View {
             .padding(24)
             .zIndex(1)
         }
-        .frame(width: 660, height: 400)
+        .frame(width: 660, height: 520)
         .background(.regularMaterial)
         .tint(accent)
     }
