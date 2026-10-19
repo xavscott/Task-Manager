@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>MacTaskManager</string>
+    <key>CFBundleIdentifier</key><string>com.codex.mactaskmanager</string>
+    <key>CFBundleName</key><string>Mac Task Manager</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Mac Task Manager uses Bluetooth to show connected Apple accessories and details macOS provides, such as the device name, model, and battery level.</string>
+</dict>
+</plist>

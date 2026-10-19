@@ -1,0 +1,235 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.MacTaskManager-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode 27.1.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build/sources",
+      "importPath" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/xyna/Documents/DIY Software/Task Manager/Sources/MacTaskManager/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/swift-version-1697B9BD64294346.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "MacTaskManager",
+      "moduleOutputPath" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/Modules/MacTaskManager.swiftmodule",
+      "objects" : [
+        "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "MacTaskManager_main",
+        "-parse-as-library",
+        "-swift-version",
+        "6",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
+        "-F",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "task_manager"
+      ],
+      "outputFileMapPath" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/Modules/MacTaskManager.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/xyna/Documents/DIY Software/Task Manager/Sources/MacTaskManager/main.swift"
+      ],
+      "tempsPath" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "MacTaskManager" : [
+      "/Applications/Xcode 27.1.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "MacTaskManager",
+      "-package-name",
+      "task_manager",
+      "-c",
+      "/Users/xyna/Documents/DIY Software/Task Manager/Sources/MacTaskManager/main.swift",
+      "-I",
+      "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "MacTaskManager_main",
+      "-parse-as-library",
+      "-swift-version",
+      "6",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
+      "-F",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "task_manager",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode 27.1.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "MacTaskManager" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : [
+      {
+
+      }
+    ]
+  },
+  "writeCommands" : {
+    "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/xyna/Documents/DIY Software/Task Manager/Sources/MacTaskManager/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/MacTaskManager.build/sources"
+    },
+    "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/swift-version-1697B9BD64294346.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode 27.1.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/index-build/arm64-apple-macosx/debug/swift-version-1697B9BD64294346.txt"
+    }
+  }
+}

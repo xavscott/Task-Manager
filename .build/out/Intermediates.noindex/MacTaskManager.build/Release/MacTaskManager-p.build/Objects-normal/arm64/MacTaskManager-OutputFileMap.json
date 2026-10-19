@@ -1,0 +1,16 @@
+{
+  "" : {
+    "const-values" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary.swiftconstvalues",
+    "dependencies" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary.d",
+    "diagnostics" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary.dia",
+    "emit-module-dependencies" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary-emit-module.dia",
+    "pch" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/MacTaskManager-primary.swiftdeps"
+  },
+  "/Users/xyna/Documents/DIY Software/Task Manager/Sources/MacTaskManager/main.swift" : {
+    "index-unit-output-path" : "/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/main.o",
+    "llvm-bc" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/main.bc",
+    "object" : "/Users/xyna/Documents/DIY Software/Task Manager/.build/out/Intermediates.noindex/MacTaskManager.build/Release/MacTaskManager-p.build/Objects-normal/arm64/main.o"
+  }
+}
