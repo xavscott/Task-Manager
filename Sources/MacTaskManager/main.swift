@@ -1162,7 +1162,7 @@ struct ContentView: View {
                         description: Text("Connect an Apple accessory such as AirPods, Magic Mouse, Magic Keyboard, or Magic Trackpad, then refresh."))
                         .frame(maxWidth: .infinity, minHeight: 300)
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], alignment: .leading, spacing: 14) {
                         ForEach(monitor.appleDevices) { device in
                             appleDeviceCard(device)
                         }
@@ -1189,8 +1189,15 @@ struct ContentView: View {
                     .frame(width: 48, height: 48)
                     .background(Color.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(device.name).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                    Text("Model: \(device.model)").font(.system(size: 11)).foregroundStyle(muted).lineLimit(2)
+                    Text(device.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(2)
+                        .frame(height: 36, alignment: .top)
+                    Text("Model: \(device.model)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(muted)
+                        .lineLimit(2)
+                        .frame(height: 32, alignment: .top)
                 }
                 Spacer(minLength: 0)
             }
@@ -1212,9 +1219,14 @@ struct ContentView: View {
             }
         }
         .padding(16)
+        // Keep every accessory tile the same height, even when its name/model wraps.
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 164, alignment: .topLeading)
         .background(cardFill, in: RoundedRectangle(cornerRadius: 14))
         .modifier(AdaptiveLiquidGlass(enabled: true, cornerRadius: 16))
+        // Apply the size constraint outside the glass effect as well, so the
+        // rendered tile stays fixed even if the effect changes its layout.
+        .frame(height: 164, alignment: .topLeading)
     }
 
     private func accessoryBattery(_ title: String, _ percent: Int?) -> some View {
