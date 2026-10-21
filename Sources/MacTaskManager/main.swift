@@ -1868,7 +1868,6 @@ struct ContentView: View {
             .background(cardFill, in: RoundedRectangle(cornerRadius: 9))
             .modifier(AdaptiveLiquidGlass(enabled: true, cornerRadius: 12))
     }
-
     private func informationCard(_ title: String, _ value: String, _ icon: String) -> some View {
         HStack(spacing: 11) {
             Image(systemName: icon).foregroundStyle(.blue).frame(width: 30, height: 30).background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
