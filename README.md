@@ -4,6 +4,8 @@ MacTaskManager
 <img width="767" height="415" alt="image" src="https://github.com/user-attachments/assets/429d8728-b4da-4e00-ad9b-2bb424e907c1" />
 <img width="1070" height="785" alt="image" src="https://github.com/user-attachments/assets/b69162af-7c88-45b5-b4dc-c0d1a219ec3f" />
 <img width="646" height="542" alt="image" src="https://github.com/user-attachments/assets/49980f1c-c757-471a-8432-4ecbeb7c3c10" />
+<img width="952" height="144" alt="image" src="https://github.com/user-attachments/assets/33375008-e4c1-4f3d-ba8d-836d9d510009" />
+
 
 A Windows Task Manager–style system monitor for macOS, built entirely in SwiftUI. It combines live performance graphs, a sortable process list, and detailed hardware info in a single fixed-size window styled with Liquid Glass on macOS 26. Its standout feature is a floating performance overlay: a compact, always-on-top glass panel that keeps your CPU, GPU, memory, temperature, and power draw visible while you work, game, or watch fullscreen video. It floats above fullscreen apps, follows you across Spaces, can be dragged anywhere on screen, and has adjustable glass opacity (35% to 100%) so it blends in with whatever is behind it. Beyond the overlay, the app offers real-time 60-second graphs for CPU, memory, disk, network, GPU, energy, and thermals, a searchable process list with an End Task action, system and hardware details, battery levels for connected Apple accessories (including per-bud and case levels for AirPods), startup item and local user listings, and Auto/Light/Dark appearance with selectable accent colors.
 
