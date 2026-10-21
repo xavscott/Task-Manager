@@ -814,7 +814,8 @@ private func sysctlString(_ name: String) -> String? {
     guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
     var bytes = [CChar](repeating: 0, count: size)
     guard sysctlbyname(name, &bytes, &size, nil, 0) == 0 else { return nil }
-    return String(cString: bytes)
+    let utf8Bytes = bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    return String(decoding: utf8Bytes, as: UTF8.self)
 }
 
 private func sysctlInteger(_ name: String) -> Int? {
@@ -868,7 +869,8 @@ private func profilerValue(in root: Any?, matching needles: [String]) -> String?
     return unique.joined(separator: ", ")
 }
 
-final class SystemMonitor: ObservableObject {
+@MainActor
+final class SystemMonitor: NSObject, ObservableObject {
     @Published var processes: [ProcessRow] = []
     @Published var cpuHistory: [Sample] = []
     @Published var memoryHistory: [Sample] = []
@@ -902,13 +904,18 @@ final class SystemMonitor: ObservableObject {
     private var previousDisk: DiskCounters?
     private var previousDate = Date()
 
-    init() {
+    override init() {
+        super.init()
         refresh()
         // Common modes keep the monitor ticking while menus, sheets, or other
         // run-loop modes are active instead of making updates appear foreground-only.
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        let timer = Timer(timeInterval: 1, target: self, selector: #selector(timerFired(_:)), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    @objc private func timerFired(_ timer: Timer) {
+        refresh()
     }
 
     func refresh() {
