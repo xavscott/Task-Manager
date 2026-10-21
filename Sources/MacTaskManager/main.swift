@@ -9,21 +9,28 @@ import ObjectiveC.runtime
 import AppKit
 import Metal
 import WidgetKit
+import ServiceManagement
 
 @main
 struct MacTaskManagerApp: App {
+    static let isAccessoryMonitorMode = CommandLine.arguments.contains("--accessory-monitor")
+
     @NSApplicationDelegateAdaptor(AppLifecycleDelegate.self) private var appLifecycleDelegate
     @StateObject private var monitor = SystemMonitor()
     @StateObject private var displayTheme = DisplayThemeStore()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(monitor)
-                .environmentObject(displayTheme)
-                .preferredColorScheme(displayTheme.preferredColorScheme)
-                .frame(width: 1080, height: 768)
-                .background(FixedSizeWindowConfigurator())
+            if Self.isAccessoryMonitorMode {
+                AccessoryMonitorLaunchView()
+            } else {
+                ContentView()
+                    .environmentObject(monitor)
+                    .environmentObject(displayTheme)
+                    .preferredColorScheme(displayTheme.preferredColorScheme)
+                    .frame(width: 1080, height: 768)
+                    .background(FixedSizeWindowConfigurator())
+            }
         }
         .defaultSize(width: 1080, height: 768)
         .windowResizability(.contentSize)
@@ -37,12 +44,28 @@ struct MacTaskManagerApp: App {
         }
 
         Settings {
-            DisplaySettingsView()
-                .environmentObject(displayTheme)
-                .preferredColorScheme(displayTheme.preferredColorScheme)
-                .frame(width: 660, height: 520)
+            if Self.isAccessoryMonitorMode {
+                EmptyView()
+            } else {
+                DisplaySettingsView()
+                    .environmentObject(displayTheme)
+                    .preferredColorScheme(displayTheme.preferredColorScheme)
+                    .frame(width: 660, height: 520)
+            }
         }
         .windowResizability(.contentSize)
+    }
+}
+
+private struct AccessoryMonitorLaunchView: View {
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear {
+                DispatchQueue.main.async {
+                    NSApp.windows.filter { !($0 is NSPanel) }.forEach { $0.close() }
+                }
+            }
     }
 }
 
@@ -92,11 +115,19 @@ private enum AccentChoice: String, CaseIterable, Identifiable {
 
 @MainActor
 private final class DisplayThemeStore: ObservableObject {
+    private static let sharedDefaults = UserDefaults(suiteName: "com.codex.mactaskmanager.preferences")!
+
     @Published var appearance: DisplayAppearance {
-        didSet { UserDefaults.standard.set(appearance.rawValue, forKey: "displayAppearance") }
+        didSet {
+            UserDefaults.standard.set(appearance.rawValue, forKey: "displayAppearance")
+            Self.sharedDefaults.set(appearance.rawValue, forKey: "displayAppearance")
+        }
     }
     @Published var accentChoice: AccentChoice {
-        didSet { UserDefaults.standard.set(accentChoice.rawValue, forKey: "displayAccentV2") }
+        didSet {
+            UserDefaults.standard.set(accentChoice.rawValue, forKey: "displayAccentV2")
+            Self.sharedDefaults.set(accentChoice.rawValue, forKey: "displayAccentV2")
+        }
     }
     private let originalIcon: NSImage
     var iconImage: NSImage { originalIcon }
@@ -108,10 +139,14 @@ private final class DisplayThemeStore: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        appearance = DisplayAppearance(rawValue: defaults.string(forKey: "displayAppearance") ?? "System") ?? .system
+        let configuredAppearance = DisplayAppearance(rawValue: defaults.string(forKey: "displayAppearance") ?? "System") ?? .system
         // Start this display-theme revision with the brand green instead of carrying forward
         // the earlier purple selection; future changes persist under the new preference key.
-        accentChoice = AccentChoice(rawValue: defaults.string(forKey: "displayAccentV2") ?? "green") ?? .green
+        let configuredAccent = AccentChoice(rawValue: defaults.string(forKey: "displayAccentV2") ?? "green") ?? .green
+        appearance = configuredAppearance
+        accentChoice = configuredAccent
+        Self.sharedDefaults.set(configuredAppearance.rawValue, forKey: "displayAppearance")
+        Self.sharedDefaults.set(configuredAccent.rawValue, forKey: "displayAccentV2")
         originalIcon = NSApp.applicationIconImage.copy() as? NSImage ?? NSImage(size: NSSize(width: 128, height: 128))
     }
 }
@@ -182,11 +217,113 @@ private final class FixedSizeWindowView: NSView {
 }
 
 private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    private var accessoryMonitorProcess: Process?
+    private var accessoryMonitorActivity: NSObjectProtocol?
+    private let accessoryMonitorBundleIdentifier = "com.codex.mactaskmanager.accessory-monitor"
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if MacTaskManagerApp.isAccessoryMonitorMode {
+            NSApp.setActivationPolicy(.accessory)
+            // A UIElement can otherwise be App Nap'ed when no window is visible.
+            // The helper is deliberately long-lived: it must notice accessories
+            // while the main Task Manager window is closed or in the background.
+            accessoryMonitorActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep, .automaticTerminationDisabled, .suddenTerminationDisabled],
+                reason: "Monitor Apple accessory connections"
+            )
+            AccessoryConnectionPopupController.shared.startMonitoring()
+            return
+        }
+
         WidgetCenter.shared.reloadAllTimelines()
+        registerAccessoryMonitorLoginItem()
+        startAccessoryMonitorProcess()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    private func registerAccessoryMonitorLoginItem() {
+        // The installer owns startup registration through the user's LaunchAgent.
+        // Do not register a second SMAppService item for package installs; two
+        // startup mechanisms can launch duplicate hidden monitor processes.
+        let installedAgentURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.codex.mactaskmanager.accessory-monitor.plist")
+        if FileManager.default.fileExists(atPath: installedAgentURL.path) {
+            return
+        }
+
+        // Older builds registered this helper as an embedded launch agent. Remove
+        // that registration when upgrading so launchd cannot start two helpers.
+        let legacyAgent = SMAppService.agent(plistName: "com.codex.mactaskmanager.accessory-monitor.plist")
+        if legacyAgent.status == .enabled {
+            try? legacyAgent.unregister()
+        }
+
+        let loginItem = SMAppService.loginItem(identifier: accessoryMonitorBundleIdentifier)
+        guard loginItem.status != .enabled else { return }
+
+        do {
+            try loginItem.register()
+            // Registration can complete without becoming enabled when macOS
+            // requires approval. Keep the launch-agent fallback active in that
+            // case so the monitor still survives the next login.
+            if loginItem.status != .enabled {
+                registerEmbeddedAccessoryMonitorAgent()
+            }
+        } catch {
+            NSLog("Could not register the accessory monitor login item: %@", error.localizedDescription)
+            registerEmbeddedAccessoryMonitorAgent()
+        }
+    }
+
+    private func registerEmbeddedAccessoryMonitorAgent() {
+        // The embedded launch agent is a supported fallback for systems that
+        // reject SMAppService.loginItem (for example, an ad-hoc signed build).
+        // The plist is packaged in Contents/Library/LaunchAgents by the build
+        // script, so launchd resolves BundleProgram relative to this app.
+        let agent = SMAppService.agent(plistName: "com.codex.mactaskmanager.accessory-monitor.plist")
+        guard agent.status != .enabled else { return }
+
+        do {
+            try agent.register()
+        } catch {
+            NSLog("Could not register the accessory monitor launch agent: %@", error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func startAccessoryMonitorProcess() {
+        let helperURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Library/LoginItems/MacTaskManagerAccessory.app/Contents/MacOS/MacTaskManager")
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            // Keep popups working in development builds that do not include the
+            // packaged helper app.
+            AccessoryConnectionPopupController.shared.startMonitoring()
+            return
+        }
+
+        // The LoginItems helper is normally already running after login. Only
+        // launch it here when the user opens the app during the current session.
+        if !NSRunningApplication.runningApplications(withBundleIdentifier: accessoryMonitorBundleIdentifier).isEmpty {
+            return
+        }
+
+        let process = Process()
+        process.executableURL = helperURL
+        process.arguments = ["--accessory-monitor"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            accessoryMonitorProcess = process
+        } catch {
+            NSLog("Could not start the accessory monitor: %@", error.localizedDescription)
+            AccessoryConnectionPopupController.shared.startMonitoring()
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !MacTaskManagerApp.isAccessoryMonitorMode
+    }
 }
 
 enum Page: String, CaseIterable, Identifiable {
@@ -242,7 +379,320 @@ struct AppleDevice: Identifiable {
     let connection: String
     let batteryPercent: Int?
     let batteryLevels: [String: Int]
+    let chargingStates: [String: Bool]
     var id: String { name.lowercased() }
+}
+
+private struct BluetoothAccessoryCandidate {
+    let device: IOBluetoothDevice
+    let name: String
+    let model: String
+    let aliases: [String]
+}
+
+private enum AccessoryPopupKind {
+    case airPods, mouse, keyboard, trackpad, generic
+
+    var symbol: String {
+        switch self {
+        case .airPods: "airpodspro"
+        case .mouse: "computermouse"
+        case .keyboard: "keyboard"
+        case .trackpad: "rectangle.and.hand.point.up.left"
+        case .generic: "wave.3.right"
+        }
+    }
+
+    static func forName(_ name: String) -> Self? {
+        let name = name.lowercased()
+        if name.contains("airpods") { return .airPods }
+        if name.contains("magic mouse") || name.contains("apple wireless mouse") { return .mouse }
+        if name.contains("magic keyboard") || name.contains("apple wireless keyboard") { return .keyboard }
+        if name.contains("magic trackpad") { return .trackpad }
+        if name.contains("beats") { return .generic }
+        return nil
+    }
+}
+
+@MainActor
+private final class AccessoryConnectionPopupController: ObservableObject {
+    static let shared = AccessoryConnectionPopupController()
+
+    @Published var accentColor: Color = .blue
+    @Published var displayedDevice: AppleDevice?
+    @Published var connectedDevices: [AppleDevice] = []
+    private var panel: NSPanel?
+    private var dismissTask: Task<Void, Never>?
+    private var monitoringTask: Task<Void, Never>?
+    private var pendingDevices: [AppleDevice] = []
+    private var queuedIDs = Set<String>()
+    private var connectedIDs = Set<String>()
+    private var displayedDeviceID: String?
+
+    func startMonitoring() {
+        guard monitoringTask == nil else { return }
+        monitoringTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let devices = SystemMonitor.readAppleDevices()
+                connectedDevices = devices
+                observe(devices: devices, accentColor: configuredAccentColor)
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private var configuredAccentColor: Color {
+        let defaults = UserDefaults(suiteName: "com.codex.mactaskmanager.preferences") ?? .standard
+        let choice = AccentChoice(rawValue: defaults.string(forKey: "displayAccentV2") ?? "green") ?? .green
+        let appearance = DisplayAppearance(rawValue: defaults.string(forKey: "displayAppearance") ?? "Auto") ?? .system
+        let isDark: Bool
+        switch appearance {
+        case .dark: isDark = true
+        case .light: isDark = false
+        case .system:
+            isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }
+        return isDark ? choice.darkColor : choice.lightColor
+    }
+
+    func observe(devices: [AppleDevice], accentColor: Color) {
+        self.accentColor = accentColor
+        let supported = devices.filter { AccessoryPopupKind.forName("\($0.name) \($0.model)") != nil }
+        let currentIDs = Set(supported.map(\.id))
+        let newlyConnected = supported.filter { !connectedIDs.contains($0.id) }
+        connectedIDs = currentIDs
+        if let displayedDeviceID, let updatedDevice = supported.first(where: { $0.id == displayedDeviceID }) {
+            displayedDevice = updatedDevice
+        }
+
+        for device in newlyConnected where queuedIDs.insert(device.id).inserted {
+            pendingDevices.append(device)
+        }
+        pendingDevices.removeAll { !currentIDs.contains($0.id) }
+        queuedIDs.formIntersection(currentIDs)
+        presentNextIfNeeded()
+    }
+
+    private func presentNextIfNeeded() {
+        guard panel == nil, !pendingDevices.isEmpty else { return }
+        let device = pendingDevices.removeFirst()
+        queuedIDs.remove(device.id)
+        show(device)
+    }
+
+    private func show(_ device: AppleDevice) {
+        let size = NSSize(width: 430, height: 112)
+        let screen = NSApp.mainWindow?.screen ?? NSScreen.main
+        let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // Anchor to the physical top-center of the display (the notch area), not the
+        // visible frame, which begins below the menu bar and makes the pill float lower.
+        let origin = NSPoint(x: screenFrame.midX - size.width / 2, y: screenFrame.maxY - size.height)
+        displayedDevice = device
+        displayedDeviceID = device.id
+        let overlay = NSPanel(
+            contentRect: NSRect(origin: origin, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        overlay.isFloatingPanel = true
+        overlay.level = .statusBar
+        overlay.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        overlay.backgroundColor = .clear
+        overlay.isOpaque = false
+        overlay.hasShadow = false
+        overlay.hidesOnDeactivate = false
+        overlay.becomesKeyOnlyIfNeeded = true
+        let hostingView = NSHostingView(rootView: AccessoryConnectionPopupView(initialDevice: device, popup: self))
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.isOpaque = false
+        overlay.contentView = hostingView
+        panel = overlay
+        overlay.orderFrontRegardless()
+
+        dismissTask?.cancel()
+        dismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled else { return }
+            self?.dismissCurrent()
+        }
+    }
+
+    private func dismissCurrent() {
+        dismissTask?.cancel()
+        dismissTask = nil
+        panel?.orderOut(nil)
+        panel = nil
+        displayedDevice = nil
+        displayedDeviceID = nil
+
+        if !pendingDevices.isEmpty {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(350))
+                self?.presentNextIfNeeded()
+            }
+        }
+    }
+}
+
+private struct AccessoryBatteryComponent: Identifiable {
+    let name: String
+    let title: String
+    let percent: Int?
+    let isCharging: Bool?
+
+    var id: String { name }
+}
+
+private struct AccessoryBatteryIndicators: View {
+    let device: AppleDevice
+    let accentColor: Color
+    let compact: Bool
+    var alignRight = false
+
+    private var components: [AccessoryBatteryComponent] {
+        if "\(device.name) \(device.model)".localizedCaseInsensitiveContains("AirPods") {
+            return ["Left", "Right", "Case"].map { component in
+                let title = component == "Left" ? "L" : component == "Right" ? "R" : "Case"
+                return AccessoryBatteryComponent(name: component, title: title,
+                    percent: device.batteryLevels[component], isCharging: device.chargingStates[component])
+            }
+        }
+        let percent = device.batteryPercent ?? device.batteryLevels["Battery"]
+        return [AccessoryBatteryComponent(name: "Battery", title: "Battery", percent: percent,
+            isCharging: device.chargingStates["Battery"])]
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: compact ? 4 : 8) {
+            ForEach(components) { component in
+                BatteryIndicator(component: component, accentColor: accentColor, compact: compact)
+            }
+        }
+        .frame(maxWidth: compact && !alignRight ? .infinity : nil, alignment: alignRight ? .trailing : .leading)
+    }
+}
+
+private struct BatteryIndicator: View {
+    let component: AccessoryBatteryComponent
+    let accentColor: Color
+    let compact: Bool
+
+    private var diameter: CGFloat { compact ? 24 : 34 }
+    private var batteryColor: Color {
+        (component.percent ?? 100) <= 20 ? .orange : accentColor
+    }
+    private var chargingLabel: String? {
+        switch component.isCharging {
+        case true: "Charging"
+        case false: "Not charging"
+        case nil: nil
+        }
+    }
+
+    private var batterySymbol: String {
+        guard let percent = component.percent else { return "battery.0" }
+        switch percent {
+        case 0...20: return "battery.0"
+        case 21...45: return "battery.25"
+        case 46...70: return "battery.50"
+        case 71...90: return "battery.75"
+        default: return "battery.100"
+        }
+    }
+
+    private var accessibilityDescription: String {
+        [component.title, component.percent.map { "\($0) percent" }, chargingLabel]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+    }
+
+    var body: some View {
+        VStack(spacing: compact ? 1 : 2) {
+            Image(systemName: batterySymbol)
+                .font(.system(size: compact ? 18 : 25, weight: .semibold))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(batteryColor)
+                .frame(width: diameter, height: diameter)
+
+            Text(component.percent.map { "\($0)%" } ?? "—")
+                .font(.system(size: compact ? 8 : 10, weight: .semibold, design: .rounded))
+                .foregroundStyle((component.percent ?? 100) <= 20 ? Color.orange : Color.primary)
+            Text(component.title)
+                .font(.system(size: compact ? 7 : 8, weight: .medium))
+                .foregroundStyle(.secondary)
+            if !compact, let chargingLabel {
+                Text(chargingLabel)
+                    .font(.system(size: 7, weight: component.isCharging == true ? .semibold : .regular))
+                    .foregroundStyle(component.isCharging == true ? accentColor : Color.primary.opacity(0.55))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+        .frame(minWidth: compact ? 30 : 50)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityDescription)
+    }
+}
+
+private struct AccessoryConnectionPopupView: View {
+    let initialDevice: AppleDevice
+    @ObservedObject var popup: AccessoryConnectionPopupController
+
+    @State private var isVisible = false
+
+    private var device: AppleDevice { popup.displayedDevice ?? initialDevice }
+    private var kind: AccessoryPopupKind { AccessoryPopupKind.forName("\(device.name) \(device.model)") ?? .generic }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: kind.symbol)
+                .font(.system(size: 22, weight: .medium))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(popup.accentColor)
+                .frame(width: 42, height: 42)
+                .background(popup.accentColor.opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Connected")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Text(device.name)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Text("Ready to use with your Mac")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 6)
+
+            AccessoryBatteryIndicators(device: device, accentColor: popup.accentColor, compact: true, alignRight: true)
+        }
+        .padding(.horizontal, 16)
+        .frame(width: 430, height: 112)
+        .tint(popup.accentColor)
+        .background(
+            Color.black,
+            in: UnevenRoundedRectangle(
+                cornerRadii: RectangleCornerRadii(
+                    topLeading: 0,
+                    bottomLeading: 24,
+                    bottomTrailing: 24,
+                    topTrailing: 0
+                ),
+                style: .continuous
+            )
+        )
+        .scaleEffect(isVisible ? 1 : 0.94)
+        .opacity(isVisible ? 1 : 0)
+        .onAppear {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) { isVisible = true }
+        }
+    }
 }
 
 struct EnergyStatus {
@@ -454,7 +904,11 @@ final class SystemMonitor: ObservableObject {
 
     init() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        // Common modes keep the monitor ticking while menus, sheets, or other
+        // run-loop modes are active instead of making updates appear foreground-only.
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func refresh() {
@@ -633,51 +1087,39 @@ final class SystemMonitor: ObservableObject {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private static func readAppleDevices() -> [AppleDevice] {
+    fileprivate static func readAppleDevices() -> [AppleDevice] {
         var devices: [String: AppleDevice] = [:]
         let registryBatteries = readAppleAccessoryBatteries()
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, nil)
-        if IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess {
-            defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
-            let hidDevices = (IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>) ?? []
-            for device in hidDevices {
-                let product = (IOHIDDeviceGetProperty(device, "Product" as CFString) as? String) ?? "Apple accessory"
-                let manufacturer = (IOHIDDeviceGetProperty(device, "Manufacturer" as CFString) as? String) ?? ""
-                let vendorID = (IOHIDDeviceGetProperty(device, "VendorID" as CFString) as? NSNumber)?.intValue
-                guard (manufacturer.localizedCaseInsensitiveContains("Apple") || vendorID == 1452),
-                      !product.localizedCaseInsensitiveContains("internal") else { continue }
-                let battery = (IOHIDDeviceGetProperty(device, "BatteryPercent" as CFString) as? NSNumber)?.intValue
-                    ?? (IOHIDDeviceGetProperty(device, "BatteryLevel" as CFString) as? NSNumber)?.intValue
-                let transport = (IOHIDDeviceGetProperty(device, "Transport" as CFString) as? String) ?? "Connected"
-                let level = battery.map { min(max($0, 0), 100) }
-                let item = AppleDevice(name: product, model: product, connection: transport.capitalized,
-                                       batteryPercent: level, batteryLevels: level.map { ["Battery": $0] } ?? [:])
-                devices[product.lowercased()] = item
-            }
-        }
-
-        let bluetoothDevices = connectedBluetoothDevices()
         let bluetoothBatteryCache = readBluetoothBatteryCache()
-        for device in bluetoothDevices where device.isConnected() {
-            let name = device.name ?? device.nameOrAddress ?? "Bluetooth accessory"
-            guard isAppleAccessory(name) else { continue }
+        let bluetoothDevices = connectedBluetoothDevices(batteryCache: bluetoothBatteryCache)
+        for candidate in bluetoothDevices {
+            guard let model = appleAccessoryModel(from: candidate.aliases) else { continue }
+            let device = candidate.device
+            let name = candidate.name
             let key = name.lowercased()
-            let existing = devices[key]
             let address = normalizeBluetoothAddress(device.addressString)
             // Control Center can keep the last case level in Bluetooth's DeviceCache
             // under the accessory's user-assigned name, even when the live case getter
             // reports 0 (the case is asleep). Resolve by address first, then cache aliases.
-            var levels = bluetoothBatteryCache.levels(forAddress: address, names: [name, device.nameOrAddress ?? "", existing?.model ?? ""])
-            if levels.isEmpty { levels = existing?.batteryLevels ?? [:] }
+            var levels = bluetoothBatteryCache.levels(forAddress: address, names: candidate.aliases)
+            let registryBattery = registryBatteries[address]
+            if levels["Battery"] == nil, let percent = registryBattery?.percent {
+                levels["Battery"] = percent
+            }
+            var chargingStates = bluetoothBatteryCache.chargingStates(forAddress: address, names: candidate.aliases)
             for (label, property) in [("Left", "batteryPercentLeft"), ("Right", "batteryPercentRight"), ("Case", "batteryPercentCase"), ("Battery", "batteryPercentSingle")] {
                 if let liveLevel = privateBluetoothBatteryLevel(device, property: property) {
                     levels[label] = liveLevel
                 }
+                if let isCharging = privateBluetoothChargingStatus(device, component: label) {
+                    chargingStates[label] = isCharging
+                }
             }
-            let aggregate = levels["Battery"] ?? levels["Left"].flatMap { left in levels["Right"].map { (left + $0) / 2 } } ?? existing?.batteryPercent
-            devices[key] = AppleDevice(name: name, model: existing?.model ?? name, connection: "Bluetooth",
-                                       batteryPercent: aggregate ?? registryBatteries[address], batteryLevels: levels)
+            if let isCharging = registryBattery?.isCharging { chargingStates["Battery"] = isCharging }
+            let aggregate = levels["Battery"] ?? levels["Left"].flatMap { left in levels["Right"].map { (left + $0) / 2 } }
+            devices[key] = AppleDevice(name: name, model: model, connection: "Bluetooth",
+                                       batteryPercent: aggregate ?? registryBattery?.percent,
+                                       batteryLevels: levels, chargingStates: chargingStates)
         }
         return devices.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -692,22 +1134,92 @@ final class SystemMonitor: ObservableObject {
         return percent
     }
 
-    private static func connectedBluetoothDevices() -> [IOBluetoothDevice] {
-        // macOS keeps live AirPods battery fields on connected-device objects. This class
-        // method is private, so retain the public paired-device path as a fallback.
+    private static func privateBluetoothChargingStatus(_ device: IOBluetoothDevice, component: String) -> Bool? {
+        let properties = [
+            "batteryIsCharging\(component)", "isBatteryCharging\(component)",
+            "batteryCharging\(component)", "isCharging\(component)"
+        ]
+        for property in properties {
+            let selector = NSSelectorFromString(property)
+            guard device.responds(to: selector),
+                  let value = device.value(forKey: property) as? NSNumber else { continue }
+            return value.boolValue
+        }
+        return nil
+    }
+
+    private static func connectedBluetoothDevices(batteryCache: BluetoothBatteryCache) -> [BluetoothAccessoryCandidate] {
+        // Prefer macOS's live connected-device list. If unavailable or empty, use paired
+        // devices only when IOBluetooth reports them connected; never show every paired
+        // accessory as if it were currently active.
+        var liveConnected: [IOBluetoothDevice] = []
         let selector = NSSelectorFromString("connectedDevices")
         if let method = class_getClassMethod(IOBluetoothDevice.self, selector) {
             typealias ConnectedDevicesFunction = @convention(c) (AnyClass, Selector) -> Unmanaged<AnyObject>?
             let implementation = method_getImplementation(method)
             let function = unsafeBitCast(implementation, to: ConnectedDevicesFunction.self)
             if let result = function(IOBluetoothDevice.self, selector)?.takeUnretainedValue() as? [IOBluetoothDevice] {
-                return result
+                liveConnected = result
             }
         }
-        return IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+        let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+        let activeDevices = liveConnected.isEmpty ? paired.filter { $0.isConnected() } : liveConnected
+        let pairedByAddress = Dictionary(grouping: paired, by: { normalizeBluetoothAddress($0.addressString) })
+
+        var candidates: [BluetoothAccessoryCandidate] = []
+        var seen = Set<String>()
+        for device in activeDevices {
+            let address = normalizeBluetoothAddress(device.addressString)
+            let pairedMatches = address.isEmpty ? [] : (pairedByAddress[address] ?? [])
+            let sources = [device] + pairedMatches
+            let aliases = uniqueStrings(sources.flatMap { [$0.nameOrAddress, $0.name] }
+                .compactMap { bluetoothName($0, excludingAddress: address) }
+                + batteryCache.aliases(forAddress: address))
+            guard !aliases.isEmpty,
+                  let model = appleAccessoryModel(from: aliases) else { continue }
+            let displayName = aliases.first ?? model
+            let key = address.isEmpty ? displayName.lowercased() : address
+            guard seen.insert(key).inserted else { continue }
+            candidates.append(BluetoothAccessoryCandidate(device: device, name: displayName,
+                                                           model: model, aliases: aliases))
+        }
+        return candidates
     }
 
-    private static func readAppleAccessoryBatteries() -> [String: Int] {
+    private static func bluetoothName(_ value: String?, excludingAddress address: String) -> String? {
+        guard let value else { return nil }
+        let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        let normalized = normalizeBluetoothAddress(name)
+        guard address.isEmpty || normalized != address else { return nil }
+        return name
+    }
+
+    private static func uniqueStrings(_ strings: [String]) -> [String] {
+        var seen = Set<String>()
+        return strings.filter { seen.insert($0.lowercased()).inserted }
+    }
+
+    private static func appleAccessoryModel(from names: [String]) -> String? {
+        let joined = names.joined(separator: " ").lowercased()
+        if joined.contains("airpods") {
+            return names.first(where: { $0.localizedCaseInsensitiveContains("AirPods") }) ?? "AirPods"
+        }
+        if joined.contains("magic mouse") || joined.contains("apple wireless mouse") { return "Magic Mouse" }
+        if joined.contains("magic keyboard") || joined.contains("apple wireless keyboard") { return "Magic Keyboard" }
+        if joined.contains("magic trackpad") { return "Magic Trackpad" }
+        if joined.contains("beats") {
+            return names.first(where: { $0.localizedCaseInsensitiveContains("Beats") }) ?? "Beats"
+        }
+        return nil
+    }
+
+    private struct AccessoryBatteryReading {
+        let percent: Int?
+        let isCharging: Bool?
+    }
+
+    private static func readAppleAccessoryBatteries() -> [String: AccessoryBatteryReading] {
         // Apple publishes accessory battery data on this I/O Registry service, rather than
         // as a standard IOHIDDevice property on some macOS and accessory combinations.
         guard let matching = IOServiceMatching("AppleDeviceManagementHIDEventService") else { return [:] }
@@ -715,7 +1227,7 @@ final class SystemMonitor: ObservableObject {
         guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else { return [:] }
         defer { IOObjectRelease(iterator) }
 
-        var batteries: [String: Int] = [:]
+        var batteries: [String: AccessoryBatteryReading] = [:]
         while true {
             let service = IOIteratorNext(iterator)
             guard service != 0 else { break }
@@ -724,9 +1236,14 @@ final class SystemMonitor: ObservableObject {
             let transport = IORegistryEntryCreateCFProperty(service, "Transport" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
             let manufacturer = IORegistryEntryCreateCFProperty(service, "Manufacturer" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
             guard transport == "Bluetooth", manufacturer?.localizedCaseInsensitiveContains("Apple") == true,
-                  let address = IORegistryEntryCreateCFProperty(service, "DeviceAddress" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String,
-                  let percent = IORegistryEntryCreateCFProperty(service, "BatteryPercent" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber else { continue }
-            batteries[normalizeBluetoothAddress(address)] = min(max(percent.intValue, 0), 100)
+                  let address = IORegistryEntryCreateCFProperty(service, "DeviceAddress" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String else { continue }
+            let percent = IORegistryEntryCreateCFProperty(service, "BatteryPercent" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber
+            let flags = IORegistryEntryCreateCFProperty(service, "BatteryStatusFlags" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber
+            guard percent != nil || flags != nil else { continue }
+            batteries[normalizeBluetoothAddress(address)] = AccessoryBatteryReading(
+                percent: percent.map { min(max($0.intValue, 0), 100) },
+                isCharging: flags.map { ($0.intValue & (1 << 1)) != 0 }
+            )
         }
         return batteries
     }
@@ -738,12 +1255,29 @@ final class SystemMonitor: ObservableObject {
     private struct BluetoothBatteryCache {
         var byAddress: [String: [String: Int]] = [:]
         var byName: [String: [String: Int]] = [:]
+        var chargingByAddress: [String: [String: Bool]] = [:]
+        var chargingByName: [String: [String: Bool]] = [:]
+        var aliasesByAddress: [String: [String]] = [:]
+
+        func aliases(forAddress address: String) -> [String] {
+            aliasesByAddress[address] ?? []
+        }
 
         func levels(forAddress address: String, names: [String]) -> [String: Int] {
             if let levels = byAddress[address], !levels.isEmpty { return levels }
             for name in names where !name.isEmpty {
                 if let levels = byName[name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()], !levels.isEmpty {
                     return levels
+                }
+            }
+            return [:]
+        }
+
+        func chargingStates(forAddress address: String, names: [String]) -> [String: Bool] {
+            if let states = chargingByAddress[address], !states.isEmpty { return states }
+            for name in names where !name.isEmpty {
+                if let states = chargingByName[name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()], !states.isEmpty {
+                    return states
                 }
             }
             return [:]
@@ -759,35 +1293,60 @@ final class SystemMonitor: ObservableObject {
         var result = BluetoothBatteryCache()
         let keys = [("Left", "BatteryPercentLeft"), ("Right", "BatteryPercentRight"), ("Case", "BatteryPercentCase"),
                     ("Battery", "BatteryPercent"), ("Battery", "BatteryPercentCombined"), ("Battery", "BatteryPercentSingle")]
+        let chargingKeys = [
+            ("Left", ["BatteryIsChargingLeft", "BatteryChargingLeft", "IsChargingLeft"]),
+            ("Right", ["BatteryIsChargingRight", "BatteryChargingRight", "IsChargingRight"]),
+            ("Case", ["BatteryIsChargingCase", "BatteryChargingCase", "IsChargingCase"]),
+            ("Battery", ["BatteryIsCharging", "BatteryCharging", "IsCharging"])
+        ]
+        let chargingFlagKeys = [
+            ("Left", ["BatteryStatusFlagsLeft", "BatteryFlagsLeft"]),
+            ("Right", ["BatteryStatusFlagsRight", "BatteryFlagsRight"]),
+            ("Case", ["BatteryStatusFlagsCase", "BatteryFlagsCase"]),
+            ("Battery", ["BatteryStatusFlags", "BatteryFlags"])
+        ]
         for (address, value) in deviceCache {
             guard let record = value as? [String: Any] else { continue }
+            let normalizedAddress = normalizeBluetoothAddress(address)
+            let recordAliases = uniqueStrings(["Name", "DeviceName", "UserName", "ProductName", "Product", "Model", "ModelName"]
+                .compactMap { record[$0] as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty })
+            if !recordAliases.isEmpty { result.aliasesByAddress[normalizedAddress] = recordAliases }
             var levels: [String: Int] = [:]
             for (label, key) in keys {
                 if let percent = (record[key] as? NSNumber)?.intValue { levels[label] = min(max(percent, 0), 100) }
             }
-            guard !levels.isEmpty else { continue }
-            result.byAddress[normalizeBluetoothAddress(address)] = levels
+            var chargingStates: [String: Bool] = [:]
+            for (label, aliases) in chargingKeys {
+                if let status = aliases.compactMap({ record[$0] as? NSNumber }).first {
+                    chargingStates[label] = status.boolValue
+                }
+            }
+            for (label, aliases) in chargingFlagKeys where chargingStates[label] == nil {
+                if let flags = aliases.compactMap({ record[$0] as? NSNumber }).first {
+                    chargingStates[label] = (flags.intValue & (1 << 1)) != 0
+                }
+            }
+            guard !levels.isEmpty || !chargingStates.isEmpty else { continue }
+            if !levels.isEmpty { result.byAddress[normalizedAddress] = levels }
+            if !chargingStates.isEmpty { result.chargingByAddress[normalizedAddress] = chargingStates }
             // Bluetooth stores the friendly name separately from the IOBluetooth model
             // name (for example, “Xyna” versus “AirPods 4”). Index those names too.
-            for field in ["Name", "DeviceName", "UserName", "ProductName", "Product", "Model", "ModelName"] {
-                if let alias = record[field] as? String {
-                    result.byName[alias.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = levels
-                }
+            for alias in recordAliases {
+                let normalizedAlias = alias.lowercased()
+                if !levels.isEmpty { result.byName[normalizedAlias] = levels }
+                if !chargingStates.isEmpty { result.chargingByName[normalizedAlias] = chargingStates }
             }
         }
         return result
-    }
-
-    private static func isAppleAccessory(_ name: String) -> Bool {
-        let name = name.lowercased()
-        return ["airpods", "magic mouse", "magic keyboard", "magic trackpad", "beats"].contains { name.contains($0) }
     }
 
     private static func readEnergyStatus() -> EnergyStatus {
         let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
-            return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "AC power or unavailable", charging: false, lowPowerMode: lowPowerMode)
+            return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "—", charging: false, lowPowerMode: lowPowerMode)
         }
         for source in sources {
             guard let description = IOPSGetPowerSourceDescription(blob, source)?.takeUnretainedValue() as? [String: Any],
@@ -1043,13 +1602,13 @@ struct ContentView: View {
                     Text(resourceMetricLabel)
                         .font(.system(size: 11)).foregroundStyle(muted)
                     if resource == .gpu && monitor.gpuUsage == nil {
-                        ContentUnavailableView("GPU usage unavailable", systemImage: "gpu", description: Text("This Mac does not expose a GPU utilization counter to apps."))
+                        ContentUnavailableView("No GPU reading", systemImage: "gpu", description: Text("This Mac does not expose a GPU utilization counter to apps."))
                             .frame(height: 270)
                     } else if resource == .energy && monitor.systemPowerWatts == nil {
-                        ContentUnavailableView("Energy telemetry unavailable", systemImage: "bolt", description: Text("This Mac is not currently reporting system power telemetry."))
+                        ContentUnavailableView("No energy reading", systemImage: "bolt", description: Text("This Mac is not currently reporting system power telemetry."))
                             .frame(height: 270)
                     } else if resource == .thermals && monitor.thermalTemperature == nil {
-                        ContentUnavailableView("Thermal sensors unavailable", systemImage: "thermometer.medium", description: Text("macOS did not provide temperature readings for this Mac."))
+                        ContentUnavailableView("No temperature reading", systemImage: "thermometer.medium", description: Text("macOS did not provide temperature readings for this Mac."))
                             .frame(height: 270)
                     } else {
                         performanceChart.frame(height: 270)
@@ -1155,8 +1714,6 @@ struct ContentView: View {
     private var appleDevicesPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Connected Apple accessories detected over Bluetooth or USB/HID. Bluetooth access is requested only when you open this page.")
-                    .font(.system(size: 12)).foregroundStyle(muted)
                 if monitor.appleDevices.isEmpty {
                     ContentUnavailableView("No connected Apple accessories", systemImage: "apple.logo",
                         description: Text("Connect an Apple accessory such as AirPods, Magic Mouse, Magic Keyboard, or Magic Trackpad, then refresh."))
@@ -1168,8 +1725,6 @@ struct ContentView: View {
                         }
                     }
                 }
-                Text("Model and battery details depend on what the accessory reports to macOS.")
-                    .font(.system(size: 11)).foregroundStyle(muted)
             }
             .padding(24)
         }
@@ -1182,12 +1737,12 @@ struct ContentView: View {
     }
 
     private func appleDeviceCard(_ device: AppleDevice) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: appleDeviceIcon(device.name))
-                    .font(.system(size: 24)).foregroundStyle(.blue)
+                Image(systemName: appleDeviceIcon("\(device.name) \(device.model)"))
+                    .font(.system(size: 24)).foregroundStyle(accent)
                     .frame(width: 48, height: 48)
-                    .background(Color.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
+                    .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(device.name)
                         .font(.system(size: 15, weight: .semibold))
@@ -1202,40 +1757,19 @@ struct ContentView: View {
                 Spacer(minLength: 0)
             }
             HStack {
-                Label(device.connection, systemImage: device.connection.localizedCaseInsensitiveContains("bluetooth") ? "wave.3.right" : "cable.connector")
-                    .font(.system(size: 11)).foregroundStyle(muted)
-            }
-            if device.name.localizedCaseInsensitiveContains("AirPods") && ["Left", "Right", "Case"].contains(where: { device.batteryLevels[$0] != nil }) {
-                HStack(spacing: 12) {
-                    accessoryBattery("L", device.batteryLevels["Left"])
-                    accessoryBattery("R", device.batteryLevels["Right"])
-                    accessoryBattery("Case", device.batteryLevels["Case"])
-                }
-            } else if let battery = device.batteryPercent {
-                Label("\(battery)%", systemImage: battery > 20 ? "battery.75percent" : "battery.25percent")
-                    .font(.system(size: 12, weight: .medium)).foregroundStyle(battery <= 20 ? .orange : ink)
-            } else {
-                Text("Battery unavailable").font(.system(size: 11)).foregroundStyle(muted)
+                Spacer(minLength: 0)
+                AccessoryBatteryIndicators(device: device, accentColor: accent, compact: true, alignRight: true)
             }
         }
         .padding(16)
         // Keep every accessory tile the same height, even when its name/model wraps.
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 164, alignment: .topLeading)
-        .background(cardFill, in: RoundedRectangle(cornerRadius: 14))
-        .modifier(AdaptiveLiquidGlass(enabled: true, cornerRadius: 16))
+        .frame(height: 170, alignment: .topLeading)
+        .background(cardFill, in: Rectangle())
+        .modifier(AdaptiveLiquidGlass(enabled: false, cornerRadius: 0))
         // Apply the size constraint outside the glass effect as well, so the
         // rendered tile stays fixed even if the effect changes its layout.
-        .frame(height: 164, alignment: .topLeading)
-    }
-
-    private func accessoryBattery(_ title: String, _ percent: Int?) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: percent.map { $0 <= 20 ? "battery.25percent" : "battery.75percent" } ?? "battery.0percent")
-            Text("\(title) \(percent.map { "\($0)%" } ?? "—")")
-        }
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle((percent ?? 100) <= 20 ? Color.orange : ink)
+        .frame(height: 170, alignment: .topLeading)
     }
 
     private func appleDeviceIcon(_ name: String) -> String {
@@ -1248,41 +1782,44 @@ struct ContentView: View {
     }
 
     private var startupAppsPage: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Login items and background services").font(.system(size: 16, weight: .semibold))
-                    Text("Launch agents and services found in macOS startup folders.").font(.system(size: 11)).foregroundStyle(muted)
-                }
-                Spacer()
-                Button { startupItems = readStartupItems() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.buttonStyle(.bordered)
-                Button { openLoginItemsSettings() } label: { Label("Login Items Settings", systemImage: "gearshape") }.buttonStyle(.borderedProminent)
-            }
-            if startupItems.isEmpty {
-                ContentUnavailableView("No startup services found", systemImage: "power", description: Text("No launch agents or services were found in the standard startup folders."))
-            } else {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("ITEM").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("SOURCE").frame(width: 170, alignment: .leading)
-                    }.font(.system(size: 10, weight: .semibold)).foregroundStyle(muted).padding(12)
-                    Divider()
-                    ForEach(startupItems) { item in
-                        HStack(spacing: 12) {
-                            Image(systemName: "gearshape.2").foregroundStyle(.secondary).frame(width: 22)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                Text(item.program).font(.system(size: 10, design: .monospaced)).foregroundStyle(muted).lineLimit(1)
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                            Text(item.location.contains(NSHomeDirectory()) ? "User" : "System")
-                                .font(.system(size: 11)).foregroundStyle(muted).frame(width: 170, alignment: .leading)
-                        }.padding(12)
-                        Divider()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Login items and background services").font(.system(size: 16, weight: .semibold))
+                        Text("Launch agents and services found in macOS startup folders.").font(.system(size: 11)).foregroundStyle(muted)
                     }
-                }.background(cardFill, in: RoundedRectangle(cornerRadius: 8))
+                    Spacer()
+                    Button { startupItems = readStartupItems() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.buttonStyle(.bordered)
+                    Button { openLoginItemsSettings() } label: { Label("Login Items Settings", systemImage: "gearshape") }.buttonStyle(.borderedProminent)
+                }
+                if startupItems.isEmpty {
+                    ContentUnavailableView("No startup services found", systemImage: "power", description: Text("No launch agents or services were found in the standard startup folders."))
+                } else {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("ITEM").frame(maxWidth: .infinity, alignment: .leading)
+                            Text("SOURCE").frame(width: 170, alignment: .leading)
+                        }.font(.system(size: 10, weight: .semibold)).foregroundStyle(muted).padding(12)
+                        Divider()
+                        ForEach(startupItems) { item in
+                            HStack(spacing: 12) {
+                                Image(systemName: "gearshape.2").foregroundStyle(.secondary).frame(width: 22)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                    Text(item.program).font(.system(size: 10, design: .monospaced)).foregroundStyle(muted).lineLimit(1)
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                                Text(item.location.contains(NSHomeDirectory()) ? "User" : "System")
+                                    .font(.system(size: 11)).foregroundStyle(muted).frame(width: 170, alignment: .leading)
+                            }.padding(12)
+                            Divider()
+                        }
+                    }
+                    .background(cardFill, in: Rectangle())
+                }
             }
-            Spacer(minLength: 0)
-        }.padding(24)
+            .padding(24)
+        }
     }
 
     private var usersPage: some View {
@@ -1483,7 +2020,7 @@ struct ContentView: View {
 
     private var gpuStats: some View {
         HStack(alignment: .top, spacing: 48) {
-            stat("Utilization", monitor.gpuUsage.map { String(format: "%.0f%%", $0) } ?? "Unavailable", large: true)
+            stat("Utilization", monitor.gpuUsage.map { String(format: "%.0f%%", $0) } ?? "—", large: true)
             VStack(alignment: .leading, spacing: 12) {
                 detail("Graphics processor", MTLCreateSystemDefaultDevice()?.name ?? "Not detected")
                 detail("GPU cores", monitor.hardware.gpuCores)
@@ -1496,15 +2033,15 @@ struct ContentView: View {
     private var energyStats: some View {
         HStack(alignment: .top, spacing: 48) {
             VStack(alignment: .leading, spacing: 18) {
-                stat("System power", monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "Unavailable", large: true)
+                stat("System power", monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "—", large: true)
                 stat("Battery", monitor.energyStatus.batteryPercent.map { String(format: "%.0f%%", $0) } ?? "No battery")
             }
             VStack(alignment: .leading, spacing: 12) {
                 detail("Power source", monitor.energyStatus.powerSource)
                 detail("Charging", monitor.energyStatus.charging ? "Yes" : "No")
-                detail("Charger rating", monitor.energyStatus.adapterWatts.map { String(format: "%.0f W", $0) } ?? "Unavailable")
-                detail("Battery health", monitor.energyStatus.batteryHealth ?? "Unavailable")
-                detail("Battery cycle count", monitor.energyStatus.cycleCount.map(String.init) ?? "Unavailable")
+                detail("Charger rating", monitor.energyStatus.adapterWatts.map { String(format: "%.0f W", $0) } ?? "—")
+                detail("Battery health", monitor.energyStatus.batteryHealth ?? "—")
+                detail("Battery cycle count", monitor.energyStatus.cycleCount.map(String.init) ?? "—")
                 detail("Low Power Mode", monitor.energyStatus.lowPowerMode ? "On" : "Off")
             }
         }.padding(.top, 4)
@@ -1512,7 +2049,7 @@ struct ContentView: View {
 
     private var thermalsStats: some View {
         HStack(alignment: .top, spacing: 48) {
-            stat("\(monitor.thermalSensorLabel) temperature", monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "Unavailable", large: true)
+            stat("\(monitor.thermalSensorLabel) temperature", monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "—", large: true)
             VStack(alignment: .leading, spacing: 12) {
                 detail("Thermal pressure", monitor.thermalPressure)
                 detail("Sensor source", "Apple temperature sensors")
@@ -1661,8 +2198,8 @@ struct ContentView: View {
         case .memory: "\(bytes(monitor.memoryUsed)) / \(bytes(monitor.hardware.memory))"
         case .disk: "R \(rate(monitor.diskReadRate)) · W \(rate(monitor.diskWriteRate))"
         case .network: rate(monitor.networkRate)
-        case .gpu: monitor.gpuUsage.map { String(format: "%.1f%%", $0) } ?? "Unavailable"
-        case .energy: monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "Unavailable"
+        case .gpu: monitor.gpuUsage.map { String(format: "%.1f%%", $0) } ?? "—"
+        case .energy: monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "—"
         case .thermals: monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? monitor.thermalPressure
         }
     }
@@ -1728,7 +2265,7 @@ private struct FloatingPerformanceOverlayView: View {
                 Divider()
                 metric("Memory", memoryValue, "memorychip", .purple)
                 Divider()
-                metric(monitor.thermalSensorLabel, monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "Unavailable", "thermometer.medium", .orange)
+                metric(monitor.thermalSensorLabel, monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? "—", "thermometer.medium", .orange)
                 Divider()
                 metric("Power", monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "—", "bolt", .yellow)
             }

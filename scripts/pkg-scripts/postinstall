@@ -1,0 +1,48 @@
+#!/bin/bash
+set -eu
+
+console_user="$(/usr/bin/stat -f '%Su' /dev/console)"
+if [ "$console_user" = "root" ] || [ -z "$console_user" ]; then
+    exit 0
+fi
+
+# Register the hidden accessory monitor directly. Do not open the main app here:
+# doing so can create its SwiftUI window and leave the Task Manager in the
+# foreground after login. The helper has LSUIElement=true and never displays
+# the Task Manager UI.
+user_uid="$(/usr/bin/id -u "$console_user")"
+user_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
+agent_dir="$user_home/Library/LaunchAgents"
+agent_path="$agent_dir/com.codex.mactaskmanager.accessory-monitor.plist"
+agent_label="com.codex.mactaskmanager.accessory-monitor"
+helper_path="/Applications/Mac Task Manager.app/Contents/Library/LoginItems/MacTaskManagerAccessory.app/Contents/MacOS/MacTaskManager"
+
+/bin/mkdir -p "$agent_dir"
+# Remove startup entries from older builds that launched the visible app at
+# login. The only process that should be started automatically is the hidden
+# accessory monitor below.
+for legacy_agent in \
+    "com.codex.mactaskmanager.plist" \
+    "com.codex.mactaskmanager.main.plist" \
+    "com.codex.mactaskmanager.login.plist"; do
+    legacy_label="${legacy_agent%.plist}"
+    /bin/launchctl bootout "gui/$user_uid/$legacy_label" 2>/dev/null || true
+    /bin/rm -f "$agent_dir/$legacy_agent"
+done
+/bin/rm -f "$agent_path"
+/usr/bin/plutil -create xml1 "$agent_path"
+/usr/bin/plutil -insert Label -string "$agent_label" "$agent_path"
+/usr/bin/plutil -insert ProgramArguments -json "[\"$helper_path\",\"--accessory-monitor\"]" "$agent_path"
+/usr/bin/plutil -insert RunAtLoad -bool true "$agent_path"
+/usr/bin/plutil -insert KeepAlive -bool true "$agent_path"
+/usr/bin/plutil -insert LimitLoadToSessionType -string Aqua "$agent_path"
+/usr/sbin/chown "$console_user":staff "$agent_path"
+/bin/chmod 644 "$agent_path"
+
+/bin/launchctl bootout "gui/$user_uid/$agent_label" 2>/dev/null || true
+# Startup registration is best-effort: Installer may not be allowed to control
+# the logged-in user's launchd domain. The main app retries registration when
+# it launches, so this must not make an otherwise successful installation fail.
+/bin/launchctl bootstrap "gui/$user_uid" "$agent_path" 2>/dev/null || true
+/bin/launchctl kickstart -k "gui/$user_uid/$agent_label" 2>/dev/null || true
+exit 0

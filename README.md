@@ -12,3 +12,13 @@ Requirements: macOS 14 or later (Liquid Glass requires macOS 26), Xcode 15 or la
 Build: Open the project in Xcode, select the MacTaskManager scheme, and press ⌘R.
 
 Notes: Thermal readings and some Bluetooth battery data rely on private interfaces and may change between macOS releases. Ending a process sends SIGTERM; protected processes may require administrator privileges.
+
+```sh
+./package-dmg.sh
+```
+
+The command creates both `Mac Task Manager.dmg` and `Mac Task Manager.pkg`. Use the `.pkg` when you want startup registration to happen automatically after installation; its post-install step starts the app hidden so it can register the background monitor without showing the Task Manager window. A normal click on the app opens the UI. If you use the disk image, launch the copied app once manually. The monitor then starts automatically after subsequent logins and reboots. The “Mac Task Manager” widget will then be available from the macOS widget gallery. Widget refresh timing is managed by macOS.
+
+The installer registers the accessory monitor as a background Login Agent and starts it without opening the Task Manager window. macOS starts and keeps this helper running automatically after subsequent logins and reboots. If it has been disabled, enable “Mac Task Manager Accessory Monitor” under System Settings → General → Login Items. A normal click on the app opens the Task Manager UI.
+
+Process data is read using macOS system APIs. macOS may hide details for protected processes; ending a process may require administrator permissions. Network throughput is measured from interface byte counters.
