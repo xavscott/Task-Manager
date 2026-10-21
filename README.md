@@ -19,7 +19,7 @@ Notes: Thermal readings and some Bluetooth battery data rely on private interfac
 ./package-dmg.sh
 ```
 
-The command creates both `Mac Task Manager.dmg` and `Mac Task Manager.pkg`. Use the `.pkg` when you want startup registration to happen automatically after installation; its post-install step starts the app hidden so it can register the background monitor without showing the Task Manager window. A normal click on the app opens the UI. If you use the disk image, launch the copied app once manually. The monitor then starts automatically after subsequent logins and reboots. The “Mac Task Manager” widget will then be available from the macOS widget gallery. Widget refresh timing is managed by macOS.
+The command creates both `Mac Task Manager.dmg` and `Mac Task Manager.pkg`. The `.pkg` installs the app at `/Applications/Mac Task Manager.app` and registers and starts the background accessory monitor after installation. A normal click on the app opens the UI. If you use the disk image, launch the copied app once manually. The monitor then starts automatically after subsequent logins and reboots. The “Mac Task Manager” widget will then be available from the macOS widget gallery. Widget refresh timing is managed by macOS.
 
 The installer registers the accessory monitor as a background Login Agent and starts it without opening the Task Manager window. macOS starts and keeps this helper running automatically after subsequent logins and reboots. If it has been disabled, enable “Mac Task Manager Accessory Monitor” under System Settings → General → Login Items. A normal click on the app opens the Task Manager UI.
 

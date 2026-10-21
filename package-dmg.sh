@@ -65,18 +65,19 @@ else
 codesign --force --sign - "$APP"
 fi
 
-# A DMG can only copy an app; it cannot run the app to register its startup
-# service. Also create a real installer, whose postinstall hook launches the
-# installed app once in the logged-in user's GUI session.
-# Package the main application as one bundle component. This makes Installer
-# place the app at /Applications/Mac Task Manager.app instead of inferring
-# separate nested bundle components from a staged directory.
-pkgbuild --component "$APP" \
+# Package an explicit Applications directory under the package root. Component
+# packages can relocate an app with the same bundle identifier to wherever an
+# older copy was moved, which can leave no app in /Applications after install.
+mkdir -p "$PKG_STAGE/Applications"
+cp -R "$APP" "$PKG_STAGE/Applications/$NAME.app"
+pkgbuild --root "$PKG_STAGE" \
+    --component-plist "$ROOT/scripts/pkg-components.plist" \
     --identifier com.codex.mactaskmanager \
     --version 1.0 \
-    --install-location /Applications \
+    --install-location / \
     --scripts "$ROOT/scripts/pkg-scripts" \
     "$PKG"
+rm -rf "$PKG_STAGE"
 
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
