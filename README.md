@@ -1,3 +1,5 @@
+**New Charging Dynamic Island Indicator**
+<img width="508" height="131" alt="image" src="https://github.com/user-attachments/assets/e5cc77a1-aafe-42e4-bd30-f50b83248aa7" />
 MacTaskManager
 <img width="1068" height="791" alt="image" src="https://github.com/user-attachments/assets/afbf6cda-54ba-4b0c-b5be-68b2ec33a95a" />
 <img width="1068" height="793" alt="image" src="https://github.com/user-attachments/assets/dcb8e8f4-d6f6-464f-a81a-c88b3624f898" />
