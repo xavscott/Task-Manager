@@ -15,7 +15,16 @@ DERIVED_DATA="$ROOT/.build/Xcode"
 BUILT_APP="$DERIVED_DATA/Build/Products/Release/MacTaskManager.app"
 
 cd "$ROOT"
-xcodebuild -quiet -project "$ROOT/MacTaskManager.xcodeproj" -scheme MacTaskManager -configuration Release -derivedDataPath "$DERIVED_DATA" CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project "$ROOT/MacTaskManager.xcodeproj" \
+    -scheme MacTaskManager \
+    -configuration Release \
+    -derivedDataPath "$DERIVED_DATA" \
+    -destination 'generic/platform=macOS' \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY="" \
+    build
+
 rm -rf "$APP" "$STAGE" "$DMG" "$PKG" "$PKG_STAGE"
 mkdir -p "$STAGE"
 cp -R "$BUILT_APP" "$APP"
@@ -62,7 +71,7 @@ if [ -n "$SIGNING_IDENTITY" ]; then
 else
     codesign --force --sign - "$ACCESSORY_APP"
     codesign --force --sign - --entitlements "$ROOT/Sources/MacTaskManagerWidget/MacTaskManagerWidget.entitlements" "$APP/Contents/PlugIns/MacTaskManagerWidgetExtension.appex"
-codesign --force --sign - "$APP"
+    codesign --force --sign - "$APP"
 fi
 
 # Package an explicit Applications directory under the package root. Component
