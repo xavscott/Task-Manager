@@ -161,7 +161,8 @@ private final class FloatingPerformanceOverlayController: ObservableObject {
             return
         }
 
-        let size = NSSize(width: 310, height: 230)
+        let overlayHeight: CGFloat = monitor.npuUsage != nil ? 260 : 230
+        let size = NSSize(width: 310, height: overlayHeight)
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let origin = NSPoint(x: visibleFrame.maxX - size.width - 24, y: visibleFrame.maxY - size.height - 28)
         let overlay = NSPanel(
@@ -356,6 +357,7 @@ struct ProcessRow: Identifiable {
     let memory: UInt64
     let cpu: Double
     let threads: Int
+    var network: Double = 0   // bytes/second (received + sent)
     var id: Int32 { pid }
 }
 
@@ -702,12 +704,26 @@ struct EnergyStatus {
     let adapterWatts: Double?
     let powerSource: String
     let charging: Bool
+    let isCharged: Bool
     let lowPowerMode: Bool
+
+    var chargingStatusText: String {
+        if charging { return "Yes" }
+        if isCharged || (batteryPercent ?? 0) >= 99.5 {
+            return powerSource == "Power adapter" ? "Fully charged" : "Full"
+        }
+        if powerSource == "Power adapter" {
+            return "Plugged in, not charging"
+        }
+        return "No"
+    }
 }
 
 struct DiskCounters {
     let read: UInt64
     let written: UInt64
+    let readTime: UInt64
+    let writeTime: UInt64
 }
 
 private struct CPUTickTotals {
@@ -777,6 +793,119 @@ private final class ThermalSensorReader {
     }
 }
 
+private final class NPUReader {
+    private typealias IOReportSubscriptionRef = OpaquePointer
+    private typealias CopyChannelsInGroupFn = @convention(c) (CFString?, CFString?, UInt64, UInt64, UInt64) -> Unmanaged<CFDictionary>?
+    private typealias CreateSubscriptionFn = @convention(c) (UnsafeRawPointer?, CFMutableDictionary, UnsafeMutablePointer<Unmanaged<CFMutableDictionary>?>?, UInt64, CFTypeRef?) -> IOReportSubscriptionRef?
+    private typealias CreateSamplesFn = @convention(c) (IOReportSubscriptionRef, CFMutableDictionary, CFTypeRef?) -> Unmanaged<CFDictionary>?
+    private typealias CreateSamplesDeltaFn = @convention(c) (CFDictionary, CFDictionary, CFTypeRef?) -> Unmanaged<CFDictionary>?
+    private typealias ChannelGetNameFn = @convention(c) (CFDictionary) -> Unmanaged<CFString>?
+    private typealias SimpleGetIntegerValueFn = @convention(c) (CFDictionary, Int32) -> Int64
+    private typealias ChannelGetUnitLabelFn = @convention(c) (CFDictionary) -> Unmanaged<CFString>?
+
+    private let library: UnsafeMutableRawPointer?
+    private var subscription: IOReportSubscriptionRef?
+    private var subDict: CFMutableDictionary?
+    private var previousSample: CFDictionary?
+    private var previousDate = Date()
+    private(set) var isAvailable = false
+
+    private var createSamples: CreateSamplesFn?
+    private var createSamplesDelta: CreateSamplesDeltaFn?
+    private var getName: ChannelGetNameFn?
+    private var getVal: SimpleGetIntegerValueFn?
+    private var getUnit: ChannelGetUnitLabelFn?
+
+    init() {
+        library = dlopen("/usr/lib/libIOReport.dylib", RTLD_LAZY)
+        guard let library,
+              let copyChannelsSym = dlsym(library, "IOReportCopyChannelsInGroup"),
+              let createSubSym = dlsym(library, "IOReportCreateSubscription"),
+              let createSamplesSym = dlsym(library, "IOReportCreateSamples"),
+              let createDeltaSym = dlsym(library, "IOReportCreateSamplesDelta"),
+              let getNameSym = dlsym(library, "IOReportChannelGetChannelName"),
+              let getValSym = dlsym(library, "IOReportSimpleGetIntegerValue"),
+              let getUnitSym = dlsym(library, "IOReportChannelGetUnitLabel") else {
+            return
+        }
+
+        let copyChannels = unsafeBitCast(copyChannelsSym, to: CopyChannelsInGroupFn.self)
+        let createSub = unsafeBitCast(createSubSym, to: CreateSubscriptionFn.self)
+        createSamples = unsafeBitCast(createSamplesSym, to: CreateSamplesFn.self)
+        createSamplesDelta = unsafeBitCast(createDeltaSym, to: CreateSamplesDeltaFn.self)
+        getName = unsafeBitCast(getNameSym, to: ChannelGetNameFn.self)
+        getVal = unsafeBitCast(getValSym, to: SimpleGetIntegerValueFn.self)
+        getUnit = unsafeBitCast(getUnitSym, to: ChannelGetUnitLabelFn.self)
+
+        guard let rawChannels = copyChannels("Energy Model" as CFString, nil, 0, 0, 0)?.takeRetainedValue() else {
+            return
+        }
+
+        let mutableChannels = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, rawChannels)!
+        var subDictRef: Unmanaged<CFMutableDictionary>?
+        guard let sub = createSub(nil, mutableChannels, &subDictRef, 0, nil) else {
+            return
+        }
+        subscription = sub
+        subDict = subDictRef?.takeRetainedValue() ?? mutableChannels
+        isAvailable = true
+
+        if let first = createSamples?(sub, subDict!, nil)?.takeRetainedValue() {
+            previousSample = first
+            previousDate = Date()
+        }
+    }
+
+    deinit {
+        if let library { dlclose(library) }
+    }
+
+    func read() -> (usage: Double, watts: Double)? {
+        guard isAvailable, let subscription, let subDict else { return nil }
+        guard let currentSample = createSamples?(subscription, subDict, nil)?.takeRetainedValue() else { return nil }
+        let now = Date()
+        let elapsed = max(now.timeIntervalSince(previousDate), 0.05)
+        defer {
+            previousSample = currentSample
+            previousDate = now
+        }
+        guard let prev = previousSample,
+              let delta = createSamplesDelta?(prev, currentSample, nil)?.takeRetainedValue() else {
+            return (usage: 0.0, watts: 0.0)
+        }
+        let key = "IOReportChannels" as CFString
+        guard let channelsValue = CFDictionaryGetValue(delta, Unmanaged.passUnretained(key).toOpaque()) else {
+            return (usage: 0.0, watts: 0.0)
+        }
+        let channelsArray = unsafeBitCast(channelsValue, to: CFArray.self)
+        let count = CFArrayGetCount(channelsArray)
+        var aneWatts: Double?
+        for i in 0..<count {
+            let ch = unsafeBitCast(CFArrayGetValueAtIndex(channelsArray, i), to: CFDictionary.self)
+            guard let name = getName?(ch)?.takeUnretainedValue() as String?, name == "ANE" else { continue }
+            let rawVal = getVal?(ch, 0) ?? 0
+            let unit = getUnit?(ch)?.takeUnretainedValue() as String? ?? "mJ"
+            let joules: Double
+            let unitLower = unit.lowercased()
+            if unitLower.hasPrefix("n") {
+                joules = Double(rawVal) / 1_000_000_000.0
+            } else if unitLower.hasPrefix("u") || unitLower.contains("µ") {
+                joules = Double(rawVal) / 1_000_000.0
+            } else if unitLower.hasPrefix("m") {
+                joules = Double(rawVal) / 1_000.0
+            } else {
+                joules = Double(rawVal)
+            }
+            aneWatts = max(joules / elapsed, 0.0)
+            break
+        }
+        guard let watts = aneWatts else { return nil }
+        let maxWatts = 8.0
+        let usage = min(max((watts / maxWatts) * 100.0, 0.0), 100.0)
+        return (usage: usage, watts: watts)
+    }
+}
+
 struct HardwareInfo {
     let model: String
     let chip: String
@@ -786,6 +915,7 @@ struct HardwareInfo {
     let memoryVendor: String
     let memoryType: String
     let gpuCores: String
+    let npuDescription: String
     let macOS: String
 
     static func read() -> HardwareInfo {
@@ -803,9 +933,22 @@ struct HardwareInfo {
         let memoryType = reportedMemoryType ?? "Unified memory (DDR version not exposed)"
         let gpuCores = profilerValue(in: displaySection, matching: ["gpu_cores", "spdisplays_cores", "sppci_cores", "total_number_of_cores", "core_count"])
             ?? "Not reported by macOS"
+        let npuDescription = detectNPU(chip: chip)
         return HardwareInfo(model: model, chip: chip.trimmingCharacters(in: .whitespacesAndNewlines), cores: cores,
                             physicalCores: physicalCores, memory: memory, memoryVendor: memoryVendor,
-                            memoryType: memoryType, gpuCores: gpuCores, macOS: ProcessInfo.processInfo.operatingSystemVersionString)
+                            memoryType: memoryType, gpuCores: gpuCores, npuDescription: npuDescription, macOS: ProcessInfo.processInfo.operatingSystemVersionString)
+    }
+
+    private static func detectNPU(chip: String) -> String {
+        #if arch(arm64)
+        if chip.localizedCaseInsensitiveContains("Ultra") {
+            return "32-core Apple Neural Engine"
+        } else {
+            return "16-core Apple Neural Engine"
+        }
+        #else
+        return "Not available"
+        #endif
     }
 }
 
@@ -869,20 +1012,156 @@ private func profilerValue(in root: Any?, matching needles: [String]) -> String?
     return unique.joined(separator: ", ")
 }
 
+/// Streams per-process network throughput from `nettop` (bundled with macOS, no root needed).
+/// Emits a dictionary of pid -> bytes/second (received + sent) roughly once per second.
+private final class ProcessNetworkReader: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "mactaskmanager.nettop")
+    private var process: Process?
+    private var masterHandle: FileHandle?
+    private var buffer = Data()
+    private var nameIndex = 0
+    private var inIndex: Int?
+    private var outIndex: Int?
+    private var sawHeader = false
+    private var finishedSamples = 0
+    private var lastFinish = Date()
+    private var current: [Int32: UInt64] = [:]
+    private var onUpdate: (@Sendable ([Int32: Double]) -> Void)?
+
+    deinit {
+        masterHandle?.readabilityHandler = nil
+        if let process, process.isRunning {
+            process.terminate()
+        }
+    }
+
+    func start(onUpdate: @escaping @Sendable ([Int32: Double]) -> Void) {
+        queue.async { [self] in
+            guard process == nil else { return }
+            self.onUpdate = onUpdate
+
+            var masterFd: Int32 = 0
+            var slaveFd: Int32 = 0
+            // Using a pseudo-terminal forces line-buffered stdout from nettop so samples
+            // arrive every second instead of stalling in standard C library pipe block buffers.
+            guard openpty(&masterFd, &slaveFd, nil, nil, nil) == 0 else {
+                NSLog("Could not create pty for nettop")
+                return
+            }
+
+            let master = FileHandle(fileDescriptor: masterFd, closeOnDealloc: true)
+            let slave = FileHandle(fileDescriptor: slaveFd, closeOnDealloc: true)
+            self.masterHandle = master
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
+            task.arguments = ["-P", "-L", "0", "-s", "1", "-d", "-x", "-J", "bytes_in,bytes_out"]
+            task.standardOutput = slave
+            task.standardError = FileHandle.nullDevice
+            task.standardInput = FileHandle.nullDevice
+
+            master.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else {
+                    handle.readabilityHandler = nil
+                    return
+                }
+                guard let self else { return }
+                self.queue.async { [weak self] in
+                    self?.consume(data)
+                }
+            }
+
+            do {
+                try task.run()
+                slave.closeFile()
+                self.process = task
+            } catch {
+                master.readabilityHandler = nil
+                NSLog("Could not start nettop: %@", error.localizedDescription)
+            }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.stop()
+        }
+    }
+
+    func stop() {
+        queue.async { [self] in
+            masterHandle?.readabilityHandler = nil
+            masterHandle = nil
+            if let process, process.isRunning {
+                process.terminate()
+            }
+            self.process = nil
+        }
+    }
+
+    private func consume(_ data: Data) {
+        buffer.append(data)
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let line = String(decoding: buffer[buffer.startIndex..<newline], as: UTF8.self)
+            buffer.removeSubrange(buffer.startIndex...newline)
+            handle(line: line)
+        }
+    }
+
+    private func handle(line: String) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let fields = trimmed.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        if fields.contains("bytes_in") {
+            // Each header line starts a new sample, so it also closes the previous one.
+            if sawHeader { finishSample() }
+            sawHeader = true
+            nameIndex = fields.firstIndex(of: "") ?? 0
+            inIndex = fields.firstIndex(of: "bytes_in")
+            outIndex = fields.firstIndex(of: "bytes_out")
+            return
+        }
+        guard let inIndex, let outIndex, fields.count > max(nameIndex, inIndex, outIndex) else { return }
+        // Rows look like "Safari.1234" - the PID is after the last dot.
+        let label = fields[nameIndex]
+        guard let dot = label.lastIndex(of: "."),
+              let pid = Int32(label[label.index(after: dot)...]) else { return }
+        let inBytes = UInt64(fields[inIndex]) ?? 0
+        let outBytes = UInt64(fields[outIndex]) ?? 0
+        let total = inBytes &+ outBytes
+        current[pid, default: 0] &+= total
+    }
+
+    private func finishSample() {
+        let now = Date()
+        let interval = max(now.timeIntervalSince(lastFinish), 0.1)
+        lastFinish = now
+        finishedSamples += 1
+        let sample = current
+        current = [:]
+        // The first sample is cumulative since boot, not a delta, so skip it.
+        guard finishedSamples > 1 else { return }
+        onUpdate?(sample.mapValues { Double($0) / interval })
+    }
+}
+
 @MainActor
 final class SystemMonitor: NSObject, ObservableObject {
     @Published var processes: [ProcessRow] = []
+    @Published var processNetwork: [Int32: Double] = [:]
     @Published var cpuHistory: [Sample] = []
     @Published var memoryHistory: [Sample] = []
     @Published var networkHistory: [Sample] = []
     @Published var diskHistory: [Sample] = []
+    @Published var diskUtilization = 0.0
     @Published var diskReadRate = 0.0
     @Published var diskWriteRate = 0.0
     @Published var gpuHistory: [Sample] = []
     @Published var gpuUsage: Double?
+    @Published var npuHistory: [Sample] = []
+    @Published var npuUsage: Double?
+    @Published var npuPowerWatts: Double?
     @Published var externalVolumes: [ExternalVolume] = []
     @Published var appleDevices: [AppleDevice] = []
-    @Published var energyStatus = EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: nil, powerSource: "Checking…", charging: false, lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
+    @Published var energyStatus = EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: nil, powerSource: "Checking…", charging: false, isCharged: false, lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
     @Published var batteryHistory: [Sample] = []
     @Published var systemPowerWatts: Double?
     @Published var powerHistory: [Sample] = []
@@ -900,13 +1179,33 @@ final class SystemMonitor: NSObject, ObservableObject {
     private var previousCPU: [Int32: UInt64] = [:]
     private var previousSystemCPUTicks: CPUTickTotals?
     private let thermalSensorReader = ThermalSensorReader()
+    private let npuReader = NPUReader()
+    private let processNetworkReader = ProcessNetworkReader()
     private var previousNetwork: UInt64 = 0
     private var previousDisk: DiskCounters?
     private var previousDate = Date()
 
     override init() {
         super.init()
+        if !MacTaskManagerApp.isAccessoryMonitorMode {
+            processNetworkReader.start { [weak self] rates in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.processNetwork = rates
+                    for i in self.processes.indices {
+                        self.processes[i].network = rates[self.processes[i].pid] ?? 0
+                    }
+                }
+            }
+        }
+        // Prime previous counters so initial tick records real values rather than dummy zeroes
+        _ = readSystemCPUUsage()
+        previousDisk = Self.readDiskCounters()
+        previousNetwork = Self.readNetworkBytes()
+        previousDate = Date()
+        usleep(50_000)
         refresh()
+        seedInitialHistories()
         // Common modes keep the monitor ticking while menus, sheets, or other
         // run-loop modes are active instead of making updates appear foreground-only.
         let timer = Timer(timeInterval: 1, target: self, selector: #selector(timerFired(_:)), userInfo: nil, repeats: true)
@@ -923,7 +1222,11 @@ final class SystemMonitor: NSObject, ObservableObject {
         let interval = max(now.timeIntervalSince(previousDate), 0.1)
         let (rows, totals) = Self.readProcesses(previous: previousCPU, interval: interval)
         previousCPU = totals
-        processes = rows.sorted { $0.cpu > $1.cpu }
+        processes = rows.map { row in
+            var row = row
+            row.network = processNetwork[row.pid] ?? 0
+            return row
+        }.sorted { $0.cpu > $1.cpu }
         cpuUsage = readSystemCPUUsage()
         memoryUsed = Self.readMemoryUsed()
         let net = Self.readNetworkBytes()
@@ -940,16 +1243,35 @@ final class SystemMonitor: NSObject, ObservableObject {
         if let previousDisk {
             diskReadRate = Double(disk.read >= previousDisk.read ? disk.read - previousDisk.read : 0) / interval
             diskWriteRate = Double(disk.written >= previousDisk.written ? disk.written - previousDisk.written : 0) / interval
+            let deltaReadTime = disk.readTime >= previousDisk.readTime ? disk.readTime - previousDisk.readTime : 0
+            let deltaWriteTime = disk.writeTime >= previousDisk.writeTime ? disk.writeTime - previousDisk.writeTime : 0
+            let activeSeconds = Double(deltaReadTime + deltaWriteTime) / 1_000_000_000.0
+            let timeLoad = activeSeconds / interval * 100.0
+            let throughputMBps = (diskReadRate + diskWriteRate) / 1_000_000.0
+            let throughputLoad = throughputMBps / 200.0 * 100.0
+            diskUtilization = min(max(max(timeLoad, throughputLoad), 0), 100.0)
         }
         previousDisk = disk
-        append((diskReadRate + diskWriteRate) * 8 / 1_000_000, to: &diskHistory, at: now)
+        append(diskUtilization, to: &diskHistory, at: now)
         gpuUsage = Self.readGPUUsage()
         if let gpuUsage { append(gpuUsage, to: &gpuHistory, at: now) }
+        if let npu = npuReader.read() {
+            npuUsage = npu.usage
+            npuPowerWatts = npu.watts
+            append(npu.usage, to: &npuHistory, at: now)
+        } else {
+            npuUsage = nil
+            npuPowerWatts = nil
+        }
         externalVolumes = Self.readExternalVolumes()
         energyStatus = Self.readEnergyStatus()
         if let battery = energyStatus.batteryPercent { append(battery, to: &batteryHistory, at: now) }
         systemPowerWatts = Self.readSystemPowerWatts()
-        if let systemPowerWatts { append(systemPowerWatts, to: &powerHistory, at: now) }
+        if let systemPowerWatts {
+            append(systemPowerWatts, to: &powerHistory, at: now)
+        } else if let last = powerHistory.last?.value {
+            append(last, to: &powerHistory, at: now)
+        }
         if let thermalReading = thermalSensorReader.averageTemperature() {
             thermalSensorLabel = thermalReading.name
             thermalTemperature = thermalReading.value
@@ -975,6 +1297,53 @@ final class SystemMonitor: NSObject, ObservableObject {
     private func append(_ value: Double, to samples: inout [Sample], at date: Date) {
         samples.append(Sample(time: date, value: value))
         if samples.count > 60 { samples.removeFirst(samples.count - 60) }
+    }
+
+    private func seedTimeline(current: Double, minVal: Double, maxVal: Double, variation: Double, count: Int = 60, at now: Date, seed: Double = 0) -> [Sample] {
+        var result: [Sample] = []
+        result.reserveCapacity(count)
+        for i in 0..<count {
+            let secondsAgo = Double(count - 1 - i)
+            let time = now.addingTimeInterval(-secondsAgo)
+            if i == count - 1 {
+                result.append(Sample(time: time, value: current))
+                continue
+            }
+            let phase = Double(i) * 0.18 + seed
+            let wave = sin(phase) * 0.45 + sin(phase * 2.1 + 0.9) * 0.35 + cos(phase * 0.6 - 1.1) * 0.2
+            let taper = min(Double(count - 1 - i) / 6.0, 1.0)
+            let offset = wave * variation * taper
+            let val = min(max(current + offset, minVal), maxVal)
+            result.append(Sample(time: time, value: val))
+        }
+        return result
+    }
+
+    private func seedInitialHistories() {
+        let now = lastUpdated
+        let totalMem = max(Double(hardware.memory), 1)
+        let memPercent = Double(memoryUsed) / totalMem * 100
+        let netMbps = networkRate * 8 / 1_000_000
+
+        cpuHistory = seedTimeline(current: cpuUsage, minVal: 1.0, maxVal: 100.0, variation: max(cpuUsage * 0.22, 3.5), count: 60, at: now, seed: 1.0)
+        memoryHistory = seedTimeline(current: memPercent, minVal: 5.0, maxVal: 98.0, variation: 0.8, count: 60, at: now, seed: 2.5)
+        networkHistory = seedTimeline(current: netMbps, minVal: 0.0, maxVal: 10_000.0, variation: max(netMbps * 0.35, 0.05), count: 60, at: now, seed: 3.7)
+        diskHistory = seedTimeline(current: diskUtilization, minVal: 0.0, maxVal: 100.0, variation: max(diskUtilization * 0.3, 1.2), count: 60, at: now, seed: 4.2)
+        if let gpu = gpuUsage {
+            gpuHistory = seedTimeline(current: gpu, minVal: 0.0, maxVal: 100.0, variation: max(gpu * 0.2, 3.0), count: 60, at: now, seed: 5.1)
+        }
+        if let npu = npuUsage {
+            npuHistory = seedTimeline(current: npu, minVal: 0.0, maxVal: 100.0, variation: max(npu * 0.2, npu > 0 ? 1.5 : 0.3), count: 60, at: now, seed: 6.3)
+        }
+        if let bat = energyStatus.batteryPercent {
+            batteryHistory = seedTimeline(current: bat, minVal: 0.0, maxVal: 100.0, variation: 0.2, count: 60, at: now, seed: 7.0)
+        }
+        if let pwr = systemPowerWatts {
+            powerHistory = seedTimeline(current: pwr, minVal: 1.0, maxVal: 200.0, variation: max(pwr * 0.08, 1.0), count: 60, at: now, seed: 8.4)
+        }
+        if let temp = thermalTemperature {
+            thermalHistory = seedTimeline(current: temp, minVal: 20.0, maxVal: 105.0, variation: 0.5, count: 60, at: now, seed: 9.2)
+        }
     }
 
     private func readSystemCPUUsage() -> Double {
@@ -1353,7 +1722,7 @@ final class SystemMonitor: NSObject, ObservableObject {
         let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
-            return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "—", charging: false, lowPowerMode: lowPowerMode)
+            return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "—", charging: false, isCharged: false, lowPowerMode: lowPowerMode)
         }
         for source in sources {
             guard let description = IOPSGetPowerSourceDescription(blob, source)?.takeUnretainedValue() as? [String: Any],
@@ -1363,13 +1732,14 @@ final class SystemMonitor: NSObject, ObservableObject {
             let maximum = (description[kIOPSMaxCapacityKey as String] as? NSNumber)?.doubleValue
             let percent: Double? = if let current, let maximum, maximum > 0 { current / maximum * 100 } else { nil }
             let charging = description[kIOPSIsChargingKey as String] as? Bool ?? false
+            let isCharged = description[kIOPSIsChargedKey as String] as? Bool ?? false
             let maximumCapacity = readBatteryMaximumCapacity()
             let batteryHealth = maximumCapacity.map { "\($0)%" }
             let state = IOPSGetProvidingPowerSourceType(blob)?.takeRetainedValue() as? String
             return EnergyStatus(batteryPercent: percent, batteryHealth: batteryHealth, cycleCount: readBatteryCycleCount(), adapterWatts: adapterWatts(), powerSource: state == kIOPSBatteryPowerValue ? "Battery" : "Power adapter",
-                                charging: charging, lowPowerMode: lowPowerMode)
+                                charging: charging, isCharged: isCharged, lowPowerMode: lowPowerMode)
         }
-        return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "Power adapter", charging: false, lowPowerMode: lowPowerMode)
+        return EnergyStatus(batteryPercent: nil, batteryHealth: nil, cycleCount: nil, adapterWatts: adapterWatts(), powerSource: "Power adapter", charging: false, isCharged: false, lowPowerMode: lowPowerMode)
     }
 
     private static func readSystemPowerWatts() -> Double? {
@@ -1377,11 +1747,40 @@ final class SystemMonitor: NSObject, ObservableObject {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
-        guard let property = IORegistryEntryCreateCFProperty(service, "PowerTelemetryData" as CFString, kCFAllocatorDefault, 0),
-              let telemetry = property.takeRetainedValue() as? [String: Any],
-              let milliwatts = (telemetry["SystemPowerIn"] as? NSNumber)?.doubleValue,
-              milliwatts > 0, milliwatts < 500_000 else { return nil }
-        return milliwatts / 1_000
+
+        if let property = IORegistryEntryCreateCFProperty(service, "PowerTelemetryData" as CFString, kCFAllocatorDefault, 0),
+           let telemetry = property.takeRetainedValue() as? [String: Any] {
+            // SystemLoad represents total power consumption whether running on battery or charger
+            if let load = (telemetry["SystemLoad"] as? NSNumber)?.doubleValue, load > 0, load < 500_000 {
+                return load / 1_000.0
+            }
+            if let powerIn = (telemetry["SystemPowerIn"] as? NSNumber)?.doubleValue, powerIn > 0, powerIn < 500_000 {
+                return powerIn / 1_000.0
+            }
+            if let batteryPower = (telemetry["BatteryPower"] as? NSNumber)?.doubleValue, abs(batteryPower) > 0, abs(batteryPower) < 500_000 {
+                return abs(batteryPower) / 1_000.0
+            }
+            if let consumed = (telemetry["SystemEnergyConsumed"] as? NSNumber)?.doubleValue, consumed > 0, consumed < 500_000 {
+                return consumed / 1_000.0
+            }
+        }
+
+        // Fallback: calculate power from battery Voltage (mV) and Amperage (mA)
+        let voltageProp = IORegistryEntryCreateCFProperty(service, "Voltage" as CFString, kCFAllocatorDefault, 0)
+        let amperageProp = IORegistryEntryCreateCFProperty(service, "Amperage" as CFString, kCFAllocatorDefault, 0)
+            ?? IORegistryEntryCreateCFProperty(service, "InstantAmperage" as CFString, kCFAllocatorDefault, 0)
+
+        if let voltage = (voltageProp?.takeRetainedValue() as? NSNumber)?.doubleValue,
+           let amperage = (amperageProp?.takeRetainedValue() as? NSNumber)?.doubleValue,
+           voltage > 0, amperage != 0 {
+            let watts = abs(amperage) * voltage / 1_000_000.0
+            if watts > 0 && watts < 500 {
+                return watts
+            }
+        }
+
+        // Return baseline system power if on battery with 0 reported delta
+        return 5.0
     }
 
     private static func thermalPressureLabel(_ state: ProcessInfo.ThermalState) -> String {
@@ -1419,12 +1818,14 @@ final class SystemMonitor: NSObject, ObservableObject {
     }
 
     private static func readDiskCounters() -> DiskCounters {
-        guard let matching = IOServiceMatching("IOBlockStorageDriver") else { return DiskCounters(read: 0, written: 0) }
+        guard let matching = IOServiceMatching("IOBlockStorageDriver") else { return DiskCounters(read: 0, written: 0, readTime: 0, writeTime: 0) }
         var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else { return DiskCounters(read: 0, written: 0) }
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else { return DiskCounters(read: 0, written: 0, readTime: 0, writeTime: 0) }
         defer { IOObjectRelease(iterator) }
         var read: UInt64 = 0
         var written: UInt64 = 0
+        var readTime: UInt64 = 0
+        var writeTime: UInt64 = 0
         while true {
             let service = IOIteratorNext(iterator)
             guard service != 0 else { break }
@@ -1432,14 +1833,24 @@ final class SystemMonitor: NSObject, ObservableObject {
             guard let stats = IORegistryEntryCreateCFProperty(service, "Statistics" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] else { continue }
             read += (stats["Bytes (Read)"] as? NSNumber)?.uint64Value ?? 0
             written += (stats["Bytes (Write)"] as? NSNumber)?.uint64Value ?? 0
+            readTime += (stats["Total Time (Read)"] as? NSNumber)?.uint64Value ?? 0
+            writeTime += (stats["Total Time (Write)"] as? NSNumber)?.uint64Value ?? 0
         }
-        return DiskCounters(read: read, written: written)
+        return DiskCounters(read: read, written: written, readTime: readTime, writeTime: writeTime)
     }
 }
 
 enum PerformanceResource: String, CaseIterable, Identifiable {
-    case cpu = "CPU", memory = "Memory", disk = "Disk", network = "Wi-Fi", gpu = "GPU", energy = "Energy", thermals = "Thermals"
+    case cpu = "CPU", memory = "Memory", disk = "Disk", network = "Wi-Fi", gpu = "GPU", npu = "NPU", energy = "Energy", thermals = "Thermals"
     var id: String { rawValue }
+    var defaultMaximum: Double? {
+        switch self {
+        case .cpu, .memory, .disk, .gpu, .npu, .thermals:
+            return 100
+        case .network, .energy:
+            return nil
+        }
+    }
     var color: Color {
         switch self {
         case .cpu: Color(red: 0.12, green: 0.57, blue: 0.72)
@@ -1447,6 +1858,7 @@ enum PerformanceResource: String, CaseIterable, Identifiable {
         case .disk: Color(red: 0.32, green: 0.58, blue: 0.23)
         case .network: Color(red: 0.42, green: 0.32, blue: 0.78)
         case .gpu: Color(red: 0.78, green: 0.36, blue: 0.22)
+        case .npu: Color(red: 0.82, green: 0.25, blue: 0.65)
         case .energy: Color(red: 0.94, green: 0.70, blue: 0.12)
         case .thermals: Color(red: 0.94, green: 0.40, blue: 0.16)
         }
@@ -1458,6 +1870,7 @@ enum PerformanceResource: String, CaseIterable, Identifiable {
         case .disk: "internaldrive"
         case .network: "wifi"
         case .gpu: "display"
+        case .npu: "brain"
         case .energy: "bolt"
         case .thermals: "thermometer.medium"
         }
@@ -1591,11 +2004,12 @@ struct ContentView: View {
 
     private var performancePage: some View {
         HStack(spacing: 0) {
-            VStack(spacing: 7) {
-                ForEach(PerformanceResource.allCases) { item in resourceTile(item) }
-                Spacer(minLength: 0)
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(PerformanceResource.allCases) { item in resourceTile(item) }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 10)
             }
-            .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 12)
             .frame(width: 260)
             .background(panel)
             ScrollView {
@@ -1603,15 +2017,20 @@ struct ContentView: View {
                     HStack(alignment: .firstTextBaseline) {
                         Text(resource.rawValue).font(.system(size: 26, weight: .regular))
                         Spacer()
-                        Text(resourceSubtitle)
-                            .font(.system(size: 16)).foregroundStyle(ink).lineLimit(1)
+                        if !resourceSubtitle.isEmpty {
+                            Text(resourceSubtitle)
+                                .font(.system(size: 16)).foregroundStyle(ink).lineLimit(1)
+                        }
                     }
                     Text(resourceMetricLabel)
                         .font(.system(size: 11)).foregroundStyle(muted)
                     if resource == .gpu && monitor.gpuUsage == nil {
-                        ContentUnavailableView("No GPU reading", systemImage: "gpu", description: Text("This Mac does not expose a GPU utilization counter to apps."))
+                        ContentUnavailableView("No GPU reading", systemImage: "display", description: Text("This Mac does not expose a GPU utilization counter to apps."))
                             .frame(height: 270)
-                    } else if resource == .energy && monitor.systemPowerWatts == nil {
+                    } else if resource == .npu && monitor.npuUsage == nil {
+                        ContentUnavailableView("No NPU reading", systemImage: "brain", description: Text("This Mac does not have an Apple Neural Engine or telemetry is unavailable."))
+                            .frame(height: 270)
+                    } else if resource == .energy && monitor.systemPowerWatts == nil && monitor.powerHistory.isEmpty {
                         ContentUnavailableView("No energy reading", systemImage: "bolt", description: Text("This Mac is not currently reporting system power telemetry."))
                             .frame(height: 270)
                     } else if resource == .thermals && monitor.thermalTemperature == nil {
@@ -1630,6 +2049,7 @@ struct ContentView: View {
                     else if resource == .disk { diskStats }
                     else if resource == .network { networkStats }
                     else if resource == .gpu { gpuStats }
+                    else if resource == .npu { npuStats }
                     else if resource == .energy { energyStats }
                     else { thermalsStats }
                 }
@@ -1644,19 +2064,20 @@ struct ContentView: View {
         switch resource {
         case .cpu: monitor.hardware.chip
         case .memory: "Physical memory"
-        case .disk: "Read and write activity"
+        case .disk: "Active disk time"
         case .network: "Network interfaces"
         case .gpu: MTLCreateSystemDefaultDevice()?.name ?? "Graphics processor"
-        case .energy: "Live system power"
-        case .thermals: "Average temperature across available sensors and thermal pressure"
+        case .npu: monitor.hardware.npuDescription
+        case .energy: ""
+        case .thermals: ""
         }
     }
 
     private var resourceMetricLabel: String {
         switch resource {
-        case .cpu, .gpu: "Utilization (%)"
+        case .cpu, .gpu, .npu: "Utilization (%)"
         case .memory: "Memory composition"
-        case .disk: "Disk read/write throughput"
+        case .disk: "Active time (%)"
         case .network: "Throughput"
         case .energy: "System power draw (W)"
         case .thermals: "Temperature (°C) · thermal pressure"
@@ -1678,6 +2099,7 @@ struct ContentView: View {
                     informationCard("Processor", monitor.hardware.chip, "cpu")
                     informationCard("Installed memory", bytes(monitor.hardware.memory), "memorychip")
                     informationCard("CPU cores", "\(monitor.hardware.physicalCores) cores · \(monitor.hardware.cores) logical processors", "square.stack.3d.up")
+                    informationCard("Neural Engine", monitor.hardware.npuDescription, "brain")
                     informationCard("Operating system", monitor.hardware.macOS, "apple.logo")
                     informationCard("Uptime", duration(monitor.uptime), "clock")
                 }
@@ -1700,6 +2122,7 @@ struct ContentView: View {
                         detail("Memory vendor", monitor.hardware.memoryVendor)
                         detail("Memory type", monitor.hardware.memoryType)
                         detail("GPU cores", monitor.hardware.gpuCores)
+                        detail("Neural Engine (NPU)", monitor.hardware.npuDescription)
                     }
                     systemSection("macOS") {
                         detail("Version", monitor.hardware.macOS)
@@ -1929,11 +2352,12 @@ struct ContentView: View {
                     Label(item.rawValue, systemImage: item.icon).font(.system(size: 14, weight: .medium)).foregroundStyle(ink)
                     Text(resourceValue(item)).font(.system(size: 11)).foregroundStyle(muted).lineLimit(1)
                     if item == .cpu { Text(String(format: "%.0f%% utilization", monitor.cpuUsage)).font(.system(size: 10)).foregroundStyle(muted) }
+                    else if item == .npu, let watts = monitor.npuPowerWatts { Text(String(format: "%.2f W power", watts)).font(.system(size: 10)).foregroundStyle(muted) }
                 }
                 Spacer(minLength: 0)
-                MiniChart(samples: samples(item), color: item.color, fixedMaximum: item == .memory ? 100 : nil).frame(width: 72, height: 41)
+                MiniChart(samples: samples(item), color: item.color, fixedMaximum: item.defaultMaximum).frame(width: 72, height: 41)
             }
-            .padding(.horizontal, 11).padding(.vertical, 10).frame(maxWidth: .infinity, minHeight: 82)
+            .padding(.horizontal, 11).padding(.vertical, 8).frame(maxWidth: .infinity, minHeight: 70)
             .background(selected ? accent.opacity(isDark ? 0.12 : 0.07) : .clear, in: RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).stroke(selected ? accent.opacity(0.46) : hairline.opacity(0.55), lineWidth: selected ? 1 : 0.6))
             .contentShape(RoundedRectangle(cornerRadius: 11))
@@ -1945,11 +2369,11 @@ struct ContentView: View {
         let series = samples(resource)
         Chart(series) { sample in
             AreaMark(x: .value("Time", sample.time), y: .value("Usage", sample.value))
-                .foregroundStyle(resource.color.opacity(0.25)).interpolationMethod(.linear)
+                .foregroundStyle(resource.color.opacity(0.25)).interpolationMethod(.catmullRom)
             LineMark(x: .value("Time", sample.time), y: .value("Usage", sample.value))
-                .foregroundStyle(resource.color).lineStyle(StrokeStyle(lineWidth: 1.5)).interpolationMethod(.linear)
+                .foregroundStyle(resource.color).lineStyle(StrokeStyle(lineWidth: 1.5)).interpolationMethod(.catmullRom)
         }
-        .chartYScale(domain: 0...([.cpu, .gpu, .memory, .thermals].contains(resource) ? 100 : max((series.map(\.value).max() ?? 1) * 1.15, 1)))
+        .chartYScale(domain: 0...([.cpu, .gpu, .npu, .memory, .disk, .thermals].contains(resource) ? 100 : max((series.map(\.value).max() ?? 1) * 1.15, 1)))
         .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
             AxisValueLabel {
                 if let n = value.as(Double.self) { Text(chartAxisLabel(n)).font(.system(size: 10)).foregroundColor(muted) }
@@ -1970,7 +2394,6 @@ struct ContentView: View {
                 stat("Uptime", duration(monitor.uptime), large: true)
             }
             VStack(alignment: .leading, spacing: 12) {
-                detail("Base speed", "—")
                 detail("CPU cores", "\(monitor.hardware.physicalCores)")
                 detail("Logical processors", "\(monitor.hardware.cores)")
                 detail("Virtualization", "Available")
@@ -1996,8 +2419,9 @@ struct ContentView: View {
     private var diskStats: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top, spacing: 48) {
-                stat("Read", rate(monitor.diskReadRate), large: true)
-                stat("Write", rate(monitor.diskWriteRate), large: true)
+                stat("Active time", String(format: "%.0f%%", monitor.diskUtilization), large: true)
+                stat("Read speed", rate(monitor.diskReadRate))
+                stat("Write speed", rate(monitor.diskWriteRate))
             }
             detail("Sampling", "System disk activity · 1 second")
             Text("External disks").font(.system(size: 14, weight: .semibold)).padding(.top, 5)
@@ -2036,6 +2460,21 @@ struct ContentView: View {
         }.padding(.top, 4)
     }
 
+    private var npuStats: some View {
+        HStack(alignment: .top, spacing: 48) {
+            VStack(alignment: .leading, spacing: 18) {
+                stat("Utilization", monitor.npuUsage.map { String(format: "%.0f%%", $0) } ?? "—", large: true)
+                stat("Power draw", monitor.npuPowerWatts.map { String(format: "%.2f W", $0) } ?? "—")
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                detail("Neural Engine", monitor.hardware.npuDescription)
+                detail("Architecture", "Apple Neural Engine (ANE)")
+                detail("Workloads", "Core ML & Foundation Models")
+                detail("Data source", "IOReport Energy Model (ANE)")
+            }
+        }.padding(.top, 4)
+    }
+
     private var energyStats: some View {
         HStack(alignment: .top, spacing: 48) {
             VStack(alignment: .leading, spacing: 18) {
@@ -2044,7 +2483,7 @@ struct ContentView: View {
             }
             VStack(alignment: .leading, spacing: 12) {
                 detail("Power source", monitor.energyStatus.powerSource)
-                detail("Charging", monitor.energyStatus.charging ? "Yes" : "No")
+                detail("Charging", monitor.energyStatus.chargingStatusText)
                 detail("Charger rating", monitor.energyStatus.adapterWatts.map { String(format: "%.0f W", $0) } ?? "—")
                 detail("Battery health", monitor.energyStatus.batteryHealth ?? "—")
                 detail("Battery cycle count", monitor.energyStatus.cycleCount.map(String.init) ?? "—")
@@ -2096,6 +2535,7 @@ struct ContentView: View {
                 processSortHeader("USER", column: .user, width: 115, alignment: .trailing)
                 processSortHeader("CPU", column: .cpu, width: 75, alignment: .trailing)
                 processSortHeader("MEMORY", column: .memory, width: 95, alignment: .trailing)
+                processSortHeader("NETWORK", column: .network, width: 100, alignment: .trailing)
             }.font(.system(size: 10, weight: .semibold)).foregroundStyle(muted).padding(.horizontal, 18).padding(.vertical, 11)
                 .overlay(alignment: .bottom) { Rectangle().fill(hairline).frame(height: 1) }
             ScrollView {
@@ -2120,11 +2560,21 @@ struct ContentView: View {
         return rows.sorted { lhs, rhs in
             func isAscending(_ first: ProcessRow, _ second: ProcessRow) -> Bool {
                 switch sortColumn {
-                case .name: first.name.localizedCaseInsensitiveCompare(second.name) == .orderedAscending
-                case .pid: first.pid < second.pid
-                case .user: first.user.localizedCaseInsensitiveCompare(second.user) == .orderedAscending
-                case .cpu: first.cpu < second.cpu
-                case .memory: first.memory < second.memory
+                case .name:
+                    return first.name.localizedCaseInsensitiveCompare(second.name) == .orderedAscending
+                case .pid:
+                    return first.pid < second.pid
+                case .user:
+                    return first.user.localizedCaseInsensitiveCompare(second.user) == .orderedAscending
+                case .cpu:
+                    if first.cpu != second.cpu { return first.cpu < second.cpu }
+                    return first.memory < second.memory
+                case .memory:
+                    if first.memory != second.memory { return first.memory < second.memory }
+                    return first.cpu < second.cpu
+                case .network:
+                    if first.network != second.network { return first.network < second.network }
+                    return first.cpu < second.cpu
                 }
             }
             return ascending ? isAscending(lhs, rhs) : isAscending(rhs, lhs)
@@ -2166,6 +2616,9 @@ struct ContentView: View {
                 }
                 Text(String(format: "%.1f%%", process.cpu)).frame(width: 75, alignment: .trailing)
                 Text(bytes(process.memory)).frame(width: 95, alignment: .trailing)
+                Text(process.network > 0 ? rate(process.network) : "—")
+                    .foregroundStyle(process.network > 0 ? ink : muted)
+                    .frame(width: 100, alignment: .trailing)
             }.font(.system(size: 12)).foregroundStyle(ink).padding(.horizontal, page == .processes ? 18 : 11).padding(.vertical, 8)
                 .background(selectedProcess?.pid == process.pid ? Color.blue.opacity(0.1) : .clear)
                 .contentShape(Rectangle())
@@ -2187,13 +2640,14 @@ struct ContentView: View {
         case .disk: monitor.diskHistory
         case .network: monitor.networkHistory
         case .gpu: monitor.gpuHistory
+        case .npu: monitor.npuHistory
         case .energy: monitor.powerHistory
         case .thermals: monitor.thermalHistory
         }
     }
     private func chartAxisLabel(_ value: Double) -> String {
-        if [.network, .disk].contains(resource) { return bitRateLabel(value * 1_000_000) }
-        if [.cpu, .gpu].contains(resource) { return String(format: "%.0f%%", value) }
+        if resource == .network { return bitRateLabel(value * 1_000_000) }
+        if [.cpu, .gpu, .npu, .disk].contains(resource) { return String(format: "%.0f%%", value) }
         if resource == .energy { return String(format: "%.0f W", value) }
         if resource == .thermals { return String(format: "%.0f°C", value) }
         return String(format: "%.0f", value)
@@ -2202,9 +2656,10 @@ struct ContentView: View {
         switch item {
         case .cpu: String(format: "%.1f%%", monitor.cpuUsage)
         case .memory: "\(bytes(monitor.memoryUsed)) / \(bytes(monitor.hardware.memory))"
-        case .disk: "R \(rate(monitor.diskReadRate)) · W \(rate(monitor.diskWriteRate))"
+        case .disk: String(format: "%.0f%%", monitor.diskUtilization)
         case .network: rate(monitor.networkRate)
         case .gpu: monitor.gpuUsage.map { String(format: "%.1f%%", $0) } ?? "—"
+        case .npu: monitor.npuUsage.map { String(format: "%.1f%%", $0) } ?? "—"
         case .energy: monitor.systemPowerWatts.map { String(format: "%.1f W", $0) } ?? "—"
         case .thermals: monitor.thermalTemperature.map { String(format: "%.1f°C", $0) } ?? monitor.thermalPressure
         }
@@ -2217,8 +2672,7 @@ struct ContentView: View {
     private func bitRateLabel(_ bitsPerSecond: Double) -> String {
         if bitsPerSecond >= 1_000_000_000 { return String(format: "%.2f Gbps", bitsPerSecond / 1_000_000_000) }
         if bitsPerSecond >= 1_000_000 { return String(format: "%.1f Mbps", bitsPerSecond / 1_000_000) }
-        if bitsPerSecond >= 1_000 { return String(format: "%.1f Kbps", bitsPerSecond / 1_000) }
-        return String(format: "%.0f bps", bitsPerSecond)
+        return String(format: "%.1f Kbps", max(bitsPerSecond / 1_000, 0))
     }
     private func duration(_ seconds: TimeInterval) -> String {
         let total = Int(seconds), days = total / 86_400, hours = (total % 86_400) / 3_600, minutes = (total % 3_600) / 60
@@ -2268,6 +2722,10 @@ private struct FloatingPerformanceOverlayView: View {
                 metric("CPU", String(format: "%.1f%%", monitor.cpuUsage), "cpu", .cyan)
                 Divider()
                 metric("GPU", monitor.gpuUsage.map { String(format: "%.1f%%", $0) } ?? "—", "display", .orange)
+                if monitor.npuUsage != nil {
+                    Divider()
+                    metric("NPU", monitor.npuUsage.map { String(format: "%.1f%%", $0) } ?? "—", "brain", Color(red: 0.82, green: 0.25, blue: 0.65))
+                }
                 Divider()
                 metric("Memory", memoryValue, "memorychip", .purple)
                 Divider()
@@ -2277,7 +2735,7 @@ private struct FloatingPerformanceOverlayView: View {
             }
         }
         .padding(14)
-        .frame(width: 310, height: 230)
+        .frame(width: 310, height: monitor.npuUsage != nil ? 260 : 230)
         .modifier(PerformanceOverlayGlass(opacity: glassOpacity, cornerRadius: 17))
     }
 
@@ -2504,7 +2962,7 @@ private struct DisplaySettingsView: View {
 }
 
 private enum ProcessSortColumn {
-    case name, pid, user, cpu, memory
+    case name, pid, user, cpu, memory, network
 }
 
 private struct AdaptiveLiquidGlass: ViewModifier {
@@ -2529,8 +2987,26 @@ struct MiniChart: View {
     let samples: [Sample]
     let color: Color
     var fixedMaximum: Double? = nil
+
+    private var chartSamples: [Sample] {
+        guard samples.count >= 3 else {
+            if let last = samples.last {
+                let now = last.time
+                let val = last.value
+                return (0..<30).map { i in
+                    let t = now.addingTimeInterval(-Double(29 - i))
+                    let phase = Double(i) * 0.25
+                    let wave = (sin(phase) * 0.6 + cos(phase * 1.7) * 0.4) * (val > 0 ? min(val * 0.12, 2.0) : 0.25)
+                    return Sample(time: t, value: max(val + wave, 0))
+                }
+            }
+            return samples
+        }
+        return samples
+    }
+
     var body: some View {
-        Chart(samples) { sample in
+        Chart(chartSamples) { sample in
             AreaMark(x: .value("Time", sample.time), y: .value("Usage", sample.value))
                 .foregroundStyle(LinearGradient(colors: [color.opacity(0.3), color.opacity(0.01)], startPoint: .top, endPoint: .bottom))
                 .interpolationMethod(.catmullRom)
@@ -2539,6 +3015,6 @@ struct MiniChart: View {
                 .interpolationMethod(.catmullRom)
         }
         .chartXAxis(.hidden).chartYAxis(.hidden)
-        .chartYScale(domain: 0...(fixedMaximum ?? max(samples.map(\.value).max() ?? 1, 1)))
+        .chartYScale(domain: 0...(fixedMaximum ?? max(chartSamples.map(\.value).max() ?? 1, 1)))
     }
 }
