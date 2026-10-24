@@ -40,6 +40,9 @@ struct MacTaskManagerApp: App {
             CommandMenu("View") {
                 Button("Refresh Now") { monitor.refresh() }
                     .keyboardShortcut("r", modifiers: .command)
+                Button("Preview Charger Banner") {
+                    AccessoryConnectionPopupController.shared.testChargerPopup()
+                }
             }
         }
 
@@ -416,22 +419,54 @@ private enum AccessoryPopupKind {
     }
 }
 
+private enum PopupItem {
+    case device(AppleDevice)
+    case charger(ChargerInfo)
+}
+
+struct ChargerInfo: Equatable {
+    let watts: Int?
+    let name: String
+    let batteryPercent: Int?
+    let batteryHealth: String?
+    let isCharging: Bool
+    let isCharged: Bool
+}
+
 @MainActor
 private final class AccessoryConnectionPopupController: ObservableObject {
     static let shared = AccessoryConnectionPopupController()
 
     @Published var accentColor: Color = .blue
     @Published var displayedDevice: AppleDevice?
+    @Published var displayedCharger: ChargerInfo?
     @Published var connectedDevices: [AppleDevice] = []
     private var panel: NSPanel?
     private var dismissTask: Task<Void, Never>?
     private var monitoringTask: Task<Void, Never>?
-    private var pendingDevices: [AppleDevice] = []
-    private var queuedIDs = Set<String>()
+    private var pendingItems: [PopupItem] = []
+    private var queuedDeviceIDs = Set<String>()
     private var connectedIDs = Set<String>()
     private var displayedDeviceID: String?
+    private var lastPowerSource: String?
+    private var lastAdapterWatts: Double?
+    private var lastIsCharging: Bool = false
+    private var hasSeededPowerState = false
+    private var powerNotificationSource: CFRunLoopSource?
 
     func startMonitoring() {
+        if powerNotificationSource == nil {
+            let runLoopSource = IOPSNotificationCreateRunLoopSource({ _ in
+                DispatchQueue.main.async {
+                    AccessoryConnectionPopupController.shared.checkPowerState()
+                }
+            }, nil)?.takeRetainedValue()
+            if let runLoopSource {
+                powerNotificationSource = runLoopSource
+                CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            }
+        }
+
         guard monitoringTask == nil else { return }
         monitoringTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -439,6 +474,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
                 let devices = SystemMonitor.readAppleDevices()
                 connectedDevices = devices
                 observe(devices: devices, accentColor: configuredAccentColor)
+                checkPowerState()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -468,30 +504,130 @@ private final class AccessoryConnectionPopupController: ObservableObject {
             displayedDevice = updatedDevice
         }
 
-        for device in newlyConnected where queuedIDs.insert(device.id).inserted {
-            pendingDevices.append(device)
+        for device in newlyConnected where queuedDeviceIDs.insert(device.id).inserted {
+            pendingItems.append(.device(device))
         }
-        pendingDevices.removeAll { !currentIDs.contains($0.id) }
-        queuedIDs.formIntersection(currentIDs)
+        pendingItems.removeAll { item in
+            if case .device(let d) = item {
+                return !currentIDs.contains(d.id)
+            }
+            return false
+        }
+        queuedDeviceIDs.formIntersection(currentIDs)
         presentNextIfNeeded()
     }
 
-    private func presentNextIfNeeded() {
-        guard panel == nil, !pendingDevices.isEmpty else { return }
-        let device = pendingDevices.removeFirst()
-        queuedIDs.remove(device.id)
-        show(device)
+    func checkPowerState() {
+        let energy = SystemMonitor.readEnergyStatus()
+        let currentSource = energy.powerSource
+        let currentWatts = energy.adapterWatts
+        let currentCharging = energy.charging
+
+        guard hasSeededPowerState else {
+            hasSeededPowerState = true
+            lastPowerSource = currentSource
+            lastAdapterWatts = currentWatts
+            lastIsCharging = currentCharging
+            return
+        }
+
+        let isAdapterConnected = currentSource == "Power adapter" || currentWatts != nil
+        let wasAdapterConnected = (lastPowerSource == "Power adapter") || (lastAdapterWatts != nil)
+
+        let newlyPlugged = !wasAdapterConnected && isAdapterConnected
+        let wattsChanged = wasAdapterConnected && isAdapterConnected && (lastAdapterWatts != currentWatts) && (currentWatts != nil)
+        let chargingStarted = !lastIsCharging && currentCharging && isAdapterConnected
+
+        if newlyPlugged || wattsChanged || (chargingStarted && !wasAdapterConnected) {
+            triggerChargerPopup(energy: energy)
+        } else if displayedCharger != nil && isAdapterConnected {
+            let updated = makeChargerInfo(from: energy)
+            if displayedCharger != updated {
+                displayedCharger = updated
+            }
+        }
+
+        lastPowerSource = currentSource
+        lastAdapterWatts = currentWatts
+        lastIsCharging = currentCharging
     }
 
-    private func show(_ device: AppleDevice) {
+    private func triggerChargerPopup(energy: EnergyStatus) {
+        if let w = energy.adapterWatts, w > 0 {
+            let info = makeChargerInfo(from: energy)
+            queueCharger(info)
+        } else {
+            Task { @MainActor [weak self] in
+                var resolvedEnergy = energy
+                for _ in 0..<5 {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard let self else { return }
+                    let latest = SystemMonitor.readEnergyStatus()
+                    if let w = latest.adapterWatts, w > 0 {
+                        resolvedEnergy = latest
+                        break
+                    }
+                }
+                guard let self else { return }
+                let info = self.makeChargerInfo(from: resolvedEnergy)
+                self.queueCharger(info)
+            }
+        }
+    }
+
+    private func makeChargerInfo(from energy: EnergyStatus) -> ChargerInfo {
+        let watts = energy.adapterWatts.map { Int($0.rounded()) }
+        let name = SystemMonitor.adapterName(watts: watts)
+        let batteryPercent = energy.batteryPercent.map { Int($0.rounded()) }
+        return ChargerInfo(
+            watts: watts,
+            name: name,
+            batteryPercent: batteryPercent,
+            batteryHealth: energy.batteryHealth,
+            isCharging: energy.charging,
+            isCharged: energy.isCharged
+        )
+    }
+
+    func queueCharger(_ charger: ChargerInfo) {
+        if displayedCharger != nil {
+            displayedCharger = charger
+            return
+        }
+        pendingItems.append(.charger(charger))
+        presentNextIfNeeded()
+    }
+
+    func testChargerPopup() {
+        let energy = SystemMonitor.readEnergyStatus()
+        let watts = energy.adapterWatts.map { Int($0.rounded()) } ?? 96
+        let info = ChargerInfo(
+            watts: watts,
+            name: SystemMonitor.adapterName(watts: watts),
+            batteryPercent: energy.batteryPercent.map { Int($0.rounded()) } ?? 85,
+            batteryHealth: energy.batteryHealth ?? "100%",
+            isCharging: true,
+            isCharged: false
+        )
+        queueCharger(info)
+    }
+
+    private func presentNextIfNeeded() {
+        guard panel == nil, !pendingItems.isEmpty else { return }
+        let item = pendingItems.removeFirst()
+        if case .device(let d) = item {
+            queuedDeviceIDs.remove(d.id)
+        }
+        show(item)
+    }
+
+    private func show(_ item: PopupItem) {
         let size = NSSize(width: 430, height: 112)
         let screen = NSApp.mainWindow?.screen ?? NSScreen.main
         let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         // Anchor to the physical top-center of the display (the notch area), not the
         // visible frame, which begins below the menu bar and makes the pill float lower.
         let origin = NSPoint(x: screenFrame.midX - size.width / 2, y: screenFrame.maxY - size.height)
-        displayedDevice = device
-        displayedDeviceID = device.id
         let overlay = NSPanel(
             contentRect: NSRect(origin: origin, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -506,7 +642,22 @@ private final class AccessoryConnectionPopupController: ObservableObject {
         overlay.hasShadow = false
         overlay.hidesOnDeactivate = false
         overlay.becomesKeyOnlyIfNeeded = true
-        let hostingView = NSHostingView(rootView: AccessoryConnectionPopupView(initialDevice: device, popup: self))
+
+        let rootView: AnyView
+        switch item {
+        case .device(let device):
+            displayedDevice = device
+            displayedDeviceID = device.id
+            displayedCharger = nil
+            rootView = AnyView(AccessoryConnectionPopupView(initialDevice: device, popup: self))
+        case .charger(let charger):
+            displayedCharger = charger
+            displayedDevice = nil
+            displayedDeviceID = nil
+            rootView = AnyView(ChargerConnectionPopupView(initialCharger: charger, popup: self))
+        }
+
+        let hostingView = NSHostingView(rootView: rootView)
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
@@ -522,15 +673,16 @@ private final class AccessoryConnectionPopupController: ObservableObject {
         }
     }
 
-    private func dismissCurrent() {
+    func dismissCurrent() {
         dismissTask?.cancel()
         dismissTask = nil
         panel?.orderOut(nil)
         panel = nil
         displayedDevice = nil
         displayedDeviceID = nil
+        displayedCharger = nil
 
-        if !pendingDevices.isEmpty {
+        if !pendingItems.isEmpty {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(350))
                 self?.presentNextIfNeeded()
@@ -694,6 +846,194 @@ private struct AccessoryConnectionPopupView: View {
         .onAppear {
             withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) { isVisible = true }
         }
+        .onTapGesture {
+            popup.dismissCurrent()
+        }
+    }
+}
+
+private struct ChargerConnectionPopupView: View {
+    let initialCharger: ChargerInfo
+    @ObservedObject var popup: AccessoryConnectionPopupController
+
+    @State private var isVisible = false
+
+    private var charger: ChargerInfo { popup.displayedCharger ?? initialCharger }
+
+    private var chargingColor: Color {
+        Color(red: 0.2, green: 0.85, blue: 0.4)
+    }
+
+    private var statusHeader: String {
+        if charger.isCharging {
+            return "Charging"
+        } else if charger.isCharged || (charger.batteryPercent ?? 0) >= 99 {
+            return "Fully Charged"
+        } else {
+            return "Connected"
+        }
+    }
+
+    private var titleText: String {
+        if let watts = charger.watts {
+            if charger.name.contains("\(watts)W") {
+                return charger.name
+            } else {
+                return "\(watts)W \(charger.name)"
+            }
+        }
+        return charger.name
+    }
+
+    private var subtitleText: String {
+        if let watts = charger.watts {
+            if charger.isCharging {
+                if let percent = charger.batteryPercent {
+                    return "Charging at \(watts)W • \(percent)%"
+                }
+                return "Charging at \(watts)W"
+            } else if charger.isCharged {
+                return "Battery full • \(watts)W power connected"
+            } else {
+                return "Connected to \(watts)W power source"
+            }
+        } else {
+            if charger.isCharging {
+                return "Charging your Mac"
+            } else {
+                return "Power adapter connected"
+            }
+        }
+    }
+
+    private var batterySymbol: String {
+        guard let percent = charger.batteryPercent else {
+            return charger.isCharging ? "battery.100.bolt" : "battery.100"
+        }
+        if charger.isCharging {
+            switch percent {
+            case 0...20: return "battery.0.bolt"
+            case 21...45: return "battery.25.bolt"
+            case 46...70: return "battery.50.bolt"
+            case 71...90: return "battery.75.bolt"
+            default: return "battery.100.bolt"
+            }
+        } else {
+            switch percent {
+            case 0...20: return "battery.0"
+            case 21...45: return "battery.25"
+            case 46...70: return "battery.50"
+            case 71...90: return "battery.75"
+            default: return "battery.100"
+            }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(chargingColor)
+                .frame(width: 42, height: 42)
+                .background(chargingColor.opacity(0.16), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(statusHeader)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Text(titleText)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Text(subtitleText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            HStack(alignment: .top, spacing: 10) {
+                // Battery indicator
+                VStack(spacing: 1) {
+                    Image(systemName: batterySymbol)
+                        .font(.system(size: 18, weight: .semibold))
+                        .symbolRenderingMode(.monochrome)
+                        .foregroundStyle(chargingColor)
+                        .frame(width: 24, height: 24)
+
+                    Text(charger.batteryPercent.map { "\($0)%" } ?? "—")
+                        .font(.system(size: 8, weight: .semibold, design: .rounded))
+                        .foregroundStyle((charger.batteryPercent ?? 100) <= 20 ? Color.orange : Color.primary)
+                    Text("Mac")
+                        .font(.system(size: 7, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(minWidth: 32)
+
+                // Watts indicator
+                if let watts = charger.watts {
+                    VStack(spacing: 1) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(chargingColor)
+                            .frame(width: 24, height: 24)
+
+                        Text("\(watts)W")
+                            .font(.system(size: 8, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.primary)
+                        Text("Adapter")
+                            .font(.system(size: 7, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(minWidth: 32)
+                }
+
+                // Health or status indicator
+                if let health = charger.batteryHealth {
+                    VStack(spacing: 1) {
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(popup.accentColor)
+                            .frame(width: 24, height: 24)
+
+                        Text(health)
+                            .font(.system(size: 8, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.primary)
+                        Text("Health")
+                            .font(.system(size: 7, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(minWidth: 32)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(width: 430, height: 112)
+        .tint(chargingColor)
+        .background(
+            Color.black,
+            in: UnevenRoundedRectangle(
+                cornerRadii: RectangleCornerRadii(
+                    topLeading: 0,
+                    bottomLeading: 24,
+                    bottomTrailing: 24,
+                    topTrailing: 0
+                ),
+                style: .continuous
+            )
+        )
+        .scaleEffect(isVisible ? 1 : 0.94)
+        .opacity(isVisible ? 1 : 0)
+        .onAppear {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) { isVisible = true }
+        }
+        .onTapGesture {
+            popup.dismissCurrent()
+        }
     }
 }
 
@@ -809,6 +1149,7 @@ private final class NPUReader {
     private var previousSample: CFDictionary?
     private var previousDate = Date()
     private(set) var isAvailable = false
+    private let maxWatts: Double
 
     private var createSamples: CreateSamplesFn?
     private var createSamplesDelta: CreateSamplesDeltaFn?
@@ -816,7 +1157,14 @@ private final class NPUReader {
     private var getVal: SimpleGetIntegerValueFn?
     private var getUnit: ChannelGetUnitLabelFn?
 
-    init() {
+    init(cores: Int = 16, hasHardwareANE: Bool = true) {
+        let baseWatts = 8.0
+        self.maxWatts = max(Double(cores) / 16.0 * baseWatts, baseWatts)
+        guard hasHardwareANE else {
+            library = nil
+            return
+        }
+
         library = dlopen("/usr/lib/libIOReport.dylib", RTLD_LAZY)
         guard let library,
               let copyChannelsSym = dlsym(library, "IOReportCopyChannelsInGroup"),
@@ -847,10 +1195,26 @@ private final class NPUReader {
             return
         }
         subscription = sub
-        subDict = subDictRef?.takeRetainedValue() ?? mutableChannels
-        isAvailable = true
+        let activeDict = subDictRef?.takeRetainedValue() ?? mutableChannels
+        subDict = activeDict
 
-        if let first = createSamples?(sub, subDict!, nil)?.takeRetainedValue() {
+        let key = "IOReportChannels" as CFString
+        if let channelsVal = CFDictionaryGetValue(activeDict, Unmanaged.passUnretained(key).toOpaque()) {
+            let arr = unsafeBitCast(channelsVal, to: CFArray.self)
+            let count = CFArrayGetCount(arr)
+            for i in 0..<count {
+                let ch = unsafeBitCast(CFArrayGetValueAtIndex(arr, i), to: CFDictionary.self)
+                if let name = getName?(ch)?.takeUnretainedValue() as String? {
+                    let upper = name.uppercased()
+                    if upper == "ANE" || upper.hasPrefix("ANE") || upper.contains("ANE") {
+                        isAvailable = true
+                        break
+                    }
+                }
+            }
+        }
+
+        if isAvailable, let first = createSamples?(sub, activeDict, nil)?.takeRetainedValue() {
             previousSample = first
             previousDate = Date()
         }
@@ -879,10 +1243,13 @@ private final class NPUReader {
         }
         let channelsArray = unsafeBitCast(channelsValue, to: CFArray.self)
         let count = CFArrayGetCount(channelsArray)
-        var aneWatts: Double?
+        var totalJoules: Double = 0
+        var foundChannel = false
         for i in 0..<count {
             let ch = unsafeBitCast(CFArrayGetValueAtIndex(channelsArray, i), to: CFDictionary.self)
-            guard let name = getName?(ch)?.takeUnretainedValue() as String?, name == "ANE" else { continue }
+            guard let name = getName?(ch)?.takeUnretainedValue() as String? else { continue }
+            let upper = name.uppercased()
+            guard upper == "ANE" || upper.hasPrefix("ANE") || upper.contains("ANE") else { continue }
             let rawVal = getVal?(ch, 0) ?? 0
             let unit = getUnit?(ch)?.takeUnretainedValue() as String? ?? "mJ"
             let joules: Double
@@ -896,11 +1263,11 @@ private final class NPUReader {
             } else {
                 joules = Double(rawVal)
             }
-            aneWatts = max(joules / elapsed, 0.0)
-            break
+            totalJoules += joules
+            foundChannel = true
         }
-        guard let watts = aneWatts else { return nil }
-        let maxWatts = 8.0
+        guard foundChannel else { return (usage: 0.0, watts: 0.0) }
+        let watts = max(totalJoules / elapsed, 0.0)
         let usage = min(max((watts / maxWatts) * 100.0, 0.0), 100.0)
         return (usage: usage, watts: watts)
     }
@@ -916,6 +1283,10 @@ struct HardwareInfo {
     let memoryType: String
     let gpuCores: String
     let npuDescription: String
+    let npuCores: Int?
+    let npuArchitecture: String?
+    let npuPeakTops: String?
+    let hasNPU: Bool
     let macOS: String
 
     static func read() -> HardwareInfo {
@@ -933,22 +1304,131 @@ struct HardwareInfo {
         let memoryType = reportedMemoryType ?? "Unified memory (DDR version not exposed)"
         let gpuCores = profilerValue(in: displaySection, matching: ["gpu_cores", "spdisplays_cores", "sppci_cores", "total_number_of_cores", "core_count"])
             ?? "Not reported by macOS"
-        let npuDescription = detectNPU(chip: chip)
+        let npu = detectNPU(chip: chip)
         return HardwareInfo(model: model, chip: chip.trimmingCharacters(in: .whitespacesAndNewlines), cores: cores,
                             physicalCores: physicalCores, memory: memory, memoryVendor: memoryVendor,
-                            memoryType: memoryType, gpuCores: gpuCores, npuDescription: npuDescription, macOS: ProcessInfo.processInfo.operatingSystemVersionString)
+                            memoryType: memoryType, gpuCores: gpuCores, npuDescription: npu.description,
+                            npuCores: npu.cores, npuArchitecture: npu.arch, npuPeakTops: npu.tops,
+                            hasNPU: npu.hasNPU, macOS: ProcessInfo.processInfo.operatingSystemVersionString)
     }
 
-    private static func detectNPU(chip: String) -> String {
-        #if arch(arm64)
-        if chip.localizedCaseInsensitiveContains("Ultra") {
-            return "32-core Apple Neural Engine"
-        } else {
-            return "16-core Apple Neural Engine"
+    private static func detectNPU(chip: String) -> (description: String, cores: Int?, arch: String?, tops: String?, hasNPU: Bool) {
+        var detectedCores: Int? = nil
+        var detectedUnits: Int = 1
+        var detectedArch: String? = nil
+        var foundService = false
+
+        // 1. Inspect IORegistry for Apple Neural Engine hardware services
+        let serviceClasses = ["H11ANEIn", "H1xANELoadBalancer", "AppleARMIODevice"]
+        for cls in serviceClasses {
+            var iterator: io_iterator_t = 0
+            if IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(cls), &iterator) == KERN_SUCCESS {
+                var service = IOIteratorNext(iterator)
+                while service != 0 {
+                    var name = [CChar](repeating: 0, count: 128)
+                    IORegistryEntryGetName(service, &name)
+                    let entryName = name.withUnsafeBufferPointer { ptr in ptr.baseAddress.map(String.init(cString:)) } ?? ""
+
+                    if entryName.localizedCaseInsensitiveContains("ane") {
+                        foundService = true
+                        if let props = IORegistryEntryCreateCFProperty(service, "DeviceProperties" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] {
+                            if let c = props["ANEDevicePropertyNumANECores"] as? Int, c > 0 {
+                                detectedCores = max(detectedCores ?? 0, c)
+                            }
+                            if let u = props["ANEDevicePropertyNumANEs"] as? Int, u > 0 {
+                                detectedUnits = max(detectedUnits, u)
+                            }
+                            if let a = props["ANEDevicePropertyTypeANEArchitectureTypeStr"] as? String, !a.isEmpty {
+                                detectedArch = a
+                            }
+                        }
+                    }
+                    IOObjectRelease(service)
+                    service = IOIteratorNext(iterator)
+                }
+                IOObjectRelease(iterator)
+            }
         }
-        #else
-        return "Not available"
+
+        // 2. Query runtime AppleNeuralEngine framework metadata if available
+        if let lib = dlopen("/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/AppleNeuralEngine", RTLD_LAZY) {
+            defer { dlclose(lib) }
+            if let cls: AnyClass = NSClassFromString("_ANEDeviceInfo") {
+                if let objCls = cls as? NSObject.Type {
+                    if let has = objCls.value(forKey: "hasANE") as? Bool, has {
+                        foundService = true
+                    }
+                    if let u = objCls.value(forKey: "numANEs") as? Int, u > 0 {
+                        detectedUnits = max(detectedUnits, u)
+                    }
+                    if let c = objCls.value(forKey: "numANECores") as? Int, c > 0 && detectedCores == nil {
+                        detectedCores = c
+                    }
+                    if let subType = objCls.value(forKey: "aneSubType") as? String, !subType.isEmpty && detectedArch == nil {
+                        detectedArch = subType
+                    }
+                }
+            }
+        }
+
+        #if arch(arm64)
+        if !foundService {
+            foundService = true
+        }
+        if detectedCores == nil {
+            detectedCores = chip.localizedCaseInsensitiveContains("Ultra") ? 32 : 16
+        }
         #endif
+
+        guard foundService, let baseCores = detectedCores, baseCores > 0 else {
+            return ("Not available", nil, nil, nil, false)
+        }
+
+        let totalCores = (detectedUnits > 1 && baseCores == 16) ? (16 * detectedUnits) : baseCores
+        let chipLower = chip.lowercased()
+        let archLower = (detectedArch ?? "").lowercased()
+
+        let (generation, topsStr, archDisplay): (String, String?, String) = {
+            if chipLower.contains("m4") || archLower == "h17" {
+                let tops = detectedUnits > 1 ? "\(38 * detectedUnits) TOPS" : "38 TOPS"
+                let archName = detectedArch != nil ? "Apple Neural Engine (h17 / Gen 4)" : "Apple Neural Engine (Gen 4)"
+                return ("Gen 4", tops, archName)
+            } else if chipLower.contains("m3") || archLower == "h16" {
+                let tops = detectedUnits > 1 ? "\(18 * detectedUnits) TOPS" : "18 TOPS"
+                let archName = detectedArch != nil ? "Apple Neural Engine (h16 / Gen 3)" : "Apple Neural Engine (Gen 3)"
+                return ("Gen 3", tops, archName)
+            } else if chipLower.contains("m2") || archLower == "h14" {
+                let base = 15.8
+                let tops = detectedUnits > 1 ? String(format: "%.1f TOPS", base * Double(detectedUnits)) : "15.8 TOPS"
+                let archName = detectedArch != nil ? "Apple Neural Engine (h14 / Gen 2)" : "Apple Neural Engine (Gen 2)"
+                return ("Gen 2", tops, archName)
+            } else if chipLower.contains("m1") || archLower == "h13" {
+                let tops = detectedUnits > 1 ? "\(11 * detectedUnits) TOPS" : "11 TOPS"
+                let archName = detectedArch != nil ? "Apple Neural Engine (h13 / Gen 1)" : "Apple Neural Engine (Gen 1)"
+                return ("Gen 1", tops, archName)
+            } else {
+                let archName = detectedArch != nil ? "Apple Neural Engine (\(detectedArch!))" : "Apple Neural Engine"
+                return ("", nil, archName)
+            }
+        }()
+
+        var descParts: [String] = ["\(totalCores)-core Apple Neural Engine"]
+        if !generation.isEmpty {
+            descParts.append(generation)
+        }
+        if let tops = topsStr {
+            descParts.append(tops)
+        }
+
+        let formattedDesc: String
+        if descParts.count > 1 {
+            let details = descParts.dropFirst().joined(separator: ", ")
+            formattedDesc = "\(descParts[0]) (\(details))"
+        } else {
+            formattedDesc = descParts[0]
+        }
+
+        return (formattedDesc, totalCores, archDisplay, topsStr, true)
     }
 }
 
@@ -1179,13 +1659,14 @@ final class SystemMonitor: NSObject, ObservableObject {
     private var previousCPU: [Int32: UInt64] = [:]
     private var previousSystemCPUTicks: CPUTickTotals?
     private let thermalSensorReader = ThermalSensorReader()
-    private let npuReader = NPUReader()
+    private let npuReader: NPUReader
     private let processNetworkReader = ProcessNetworkReader()
     private var previousNetwork: UInt64 = 0
     private var previousDisk: DiskCounters?
     private var previousDate = Date()
 
     override init() {
+        self.npuReader = NPUReader(cores: hardware.npuCores ?? 16, hasHardwareANE: hardware.hasNPU)
         super.init()
         if !MacTaskManagerApp.isAccessoryMonitorMode {
             processNetworkReader.start { [weak self] rates in
@@ -1333,7 +1814,13 @@ final class SystemMonitor: NSObject, ObservableObject {
             gpuHistory = seedTimeline(current: gpu, minVal: 0.0, maxVal: 100.0, variation: max(gpu * 0.2, 3.0), count: 60, at: now, seed: 5.1)
         }
         if let npu = npuUsage {
-            npuHistory = seedTimeline(current: npu, minVal: 0.0, maxVal: 100.0, variation: max(npu * 0.2, npu > 0 ? 1.5 : 0.3), count: 60, at: now, seed: 6.3)
+            if npu <= 0.01 {
+                npuHistory = (0..<60).map { i in
+                    Sample(time: now.addingTimeInterval(-Double(59 - i)), value: 0.0)
+                }
+            } else {
+                npuHistory = seedTimeline(current: npu, minVal: 0.0, maxVal: 100.0, variation: max(npu * 0.2, 0.5), count: 60, at: now, seed: 6.3)
+            }
         }
         if let bat = energyStatus.batteryPercent {
             batteryHistory = seedTimeline(current: bat, minVal: 0.0, maxVal: 100.0, variation: 0.2, count: 60, at: now, seed: 7.0)
@@ -1718,7 +2205,7 @@ final class SystemMonitor: NSObject, ObservableObject {
         return result
     }
 
-    private static func readEnergyStatus() -> EnergyStatus {
+    static func readEnergyStatus() -> EnergyStatus {
         let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
@@ -1812,9 +2299,55 @@ final class SystemMonitor: NSObject, ObservableObject {
         return capacity.flatMap { (0...100).contains($0) ? $0 : nil }
     }
 
-    private static func adapterWatts() -> Double? {
-        guard let details = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any] else { return nil }
-        return (details[kIOPSPowerAdapterWattsKey as String] as? NSNumber)?.doubleValue
+    static func adapterWatts() -> Double? {
+        if let details = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any] {
+            if let watts = (details[kIOPSPowerAdapterWattsKey as String] as? NSNumber)?.doubleValue, watts > 0 {
+                return watts
+            }
+            if let watts = (details["Watts"] as? NSNumber)?.doubleValue, watts > 0 {
+                return watts
+            }
+        }
+        if let matching = IOServiceMatching("AppleSmartBattery") {
+            let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+            if service != 0 {
+                defer { IOObjectRelease(service) }
+                if let adapterDetails = IORegistryEntryCreateCFProperty(service, "AdapterDetails" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any],
+                   let watts = (adapterDetails["Watts"] as? NSNumber)?.doubleValue, watts > 0 {
+                    return watts
+                }
+                if let chargerData = IORegistryEntryCreateCFProperty(service, "ChargerData" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any],
+                   let watts = (chargerData["ChargingWatts"] as? NSNumber)?.doubleValue ?? (chargerData["Wattage"] as? NSNumber)?.doubleValue, watts > 0 {
+                    return watts
+                }
+            }
+        }
+        return nil
+    }
+
+    static func adapterName(watts: Int?) -> String {
+        if let details = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any] {
+            if let name = details["Name"] as? String, !name.isEmpty {
+                return name
+            }
+            if let manufacturer = details["Manufacturer"] as? String, !manufacturer.isEmpty {
+                return "\(manufacturer) Power Adapter"
+            }
+        }
+        if let matching = IOServiceMatching("AppleSmartBattery") {
+            let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+            if service != 0 {
+                defer { IOObjectRelease(service) }
+                if let adapterDetails = IORegistryEntryCreateCFProperty(service, "AdapterDetails" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any],
+                   let name = adapterDetails["Name"] as? String, !name.isEmpty {
+                    return name
+                }
+            }
+        }
+        if let watts {
+            return "\(watts)W Power Adapter"
+        }
+        return "Power Adapter"
     }
 
     private static func readDiskCounters() -> DiskCounters {
@@ -2028,7 +2561,7 @@ struct ContentView: View {
                         ContentUnavailableView("No GPU reading", systemImage: "display", description: Text("This Mac does not expose a GPU utilization counter to apps."))
                             .frame(height: 270)
                     } else if resource == .npu && monitor.npuUsage == nil {
-                        ContentUnavailableView("No NPU reading", systemImage: "brain", description: Text("This Mac does not have an Apple Neural Engine or telemetry is unavailable."))
+                        ContentUnavailableView("No NPU reading", systemImage: "brain", description: Text(monitor.hardware.hasNPU ? "Apple Neural Engine telemetry is unavailable." : "This Mac does not have an Apple Neural Engine."))
                             .frame(height: 270)
                     } else if resource == .energy && monitor.systemPowerWatts == nil && monitor.powerHistory.isEmpty {
                         ContentUnavailableView("No energy reading", systemImage: "bolt", description: Text("This Mac is not currently reporting system power telemetry."))
@@ -2465,11 +2998,18 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 stat("Utilization", monitor.npuUsage.map { String(format: "%.0f%%", $0) } ?? "—", large: true)
                 stat("Power draw", monitor.npuPowerWatts.map { String(format: "%.2f W", $0) } ?? "—")
+                stat("State", (monitor.npuPowerWatts ?? 0) > 0.01 ? "Active" : "Standby")
             }
             VStack(alignment: .leading, spacing: 12) {
                 detail("Neural Engine", monitor.hardware.npuDescription)
-                detail("Architecture", "Apple Neural Engine (ANE)")
-                detail("Workloads", "Core ML & Foundation Models")
+                if let cores = monitor.hardware.npuCores {
+                    detail("Engine cores", "\(cores) cores")
+                }
+                if let tops = monitor.hardware.npuPeakTops {
+                    detail("Peak throughput", tops)
+                }
+                detail("Architecture", monitor.hardware.npuArchitecture ?? "Apple Neural Engine (ANE)")
+                detail("Workloads", "Core ML, Vision & Foundation Models")
                 detail("Data source", "IOReport Energy Model (ANE)")
             }
         }.padding(.top, 4)
@@ -2996,7 +3536,7 @@ struct MiniChart: View {
                 return (0..<30).map { i in
                     let t = now.addingTimeInterval(-Double(29 - i))
                     let phase = Double(i) * 0.25
-                    let wave = (sin(phase) * 0.6 + cos(phase * 1.7) * 0.4) * (val > 0 ? min(val * 0.12, 2.0) : 0.25)
+                    let wave = (sin(phase) * 0.6 + cos(phase * 1.7) * 0.4) * (val > 0 ? min(val * 0.12, 2.0) : 0.0)
                     return Sample(time: t, value: max(val + wave, 0))
                 }
             }
