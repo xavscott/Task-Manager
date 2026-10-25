@@ -484,9 +484,10 @@ private final class AccessoryConnectionPopupController: ObservableObject {
         }
     }
 
-    private var configuredAccentColor: Color {
+    var configuredAccentColor: Color {
         let defaults = UserDefaults(suiteName: "com.codex.mactaskmanager.preferences") ?? .standard
-        let choice = AccentChoice(rawValue: defaults.string(forKey: "displayAccentV2") ?? "green") ?? .green
+        let val = defaults.string(forKey: "displayAccentV2") ?? UserDefaults.standard.string(forKey: "displayAccentV2") ?? "green"
+        let choice = AccentChoice(rawValue: val) ?? .green
         return choice.darkColor
     }
 
@@ -595,6 +596,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     }
 
     func queueDevice(_ device: AppleDevice) {
+        accentColor = configuredAccentColor
         if displayedDeviceID == device.id {
             displayedDevice = device
             return
@@ -604,6 +606,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     }
 
     func testAccessoryPopup() {
+        accentColor = configuredAccentColor
         let dummyDevice = AppleDevice(
             name: "Magic Mouse",
             model: "Mouse",
@@ -616,6 +619,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     }
 
     func testChargerPopup() {
+        accentColor = configuredAccentColor
         let energy = SystemMonitor.readEnergyStatus()
         let watts = energy.adapterWatts.map { Int($0.rounded()) } ?? 96
         let info = ChargerInfo(
@@ -639,6 +643,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     }
 
     private func show(_ item: PopupItem) {
+        accentColor = configuredAccentColor
         isDismissing = false
         let windowSize = NSSize(width: 480, height: 128)
         let screen = NSApp.mainWindow?.screen ?? NSScreen.main
@@ -992,7 +997,11 @@ private struct ChargerConnectionPopupView: View {
     private var charger: ChargerInfo { popup.displayedCharger ?? initialCharger }
 
     private var chargingColor: Color {
-        Color(red: 0.2, green: 0.85, blue: 0.4)
+        popup.accentColor
+    }
+
+    private var batteryColor: Color {
+        (charger.batteryPercent ?? 100) <= 20 ? Color.orange : popup.accentColor
     }
 
     private var statusHeader: String {
@@ -1099,7 +1108,7 @@ private struct ChargerConnectionPopupView: View {
                         Image(systemName: batterySymbol)
                             .font(.system(size: 18, weight: .semibold))
                             .symbolRenderingMode(.monochrome)
-                            .foregroundStyle(chargingColor)
+                            .foregroundStyle(batteryColor)
                             .frame(width: 24, height: 24)
 
                         Text(charger.batteryPercent.map { "\($0)%" } ?? "—")
