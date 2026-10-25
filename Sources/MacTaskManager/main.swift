@@ -43,6 +43,9 @@ struct MacTaskManagerApp: App {
                 Button("Preview Charger Banner") {
                     AccessoryConnectionPopupController.shared.testChargerPopup()
                 }
+                Button("Preview Accessory Banner") {
+                    AccessoryConnectionPopupController.shared.testAccessoryPopup()
+                }
             }
         }
 
@@ -483,15 +486,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     private var configuredAccentColor: Color {
         let defaults = UserDefaults(suiteName: "com.codex.mactaskmanager.preferences") ?? .standard
         let choice = AccentChoice(rawValue: defaults.string(forKey: "displayAccentV2") ?? "green") ?? .green
-        let appearance = DisplayAppearance(rawValue: defaults.string(forKey: "displayAppearance") ?? "Auto") ?? .system
-        let isDark: Bool
-        switch appearance {
-        case .dark: isDark = true
-        case .light: isDark = false
-        case .system:
-            isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        }
-        return isDark ? choice.darkColor : choice.lightColor
+        return choice.darkColor
     }
 
     func observe(devices: [AppleDevice], accentColor: Color) {
@@ -598,6 +593,27 @@ private final class AccessoryConnectionPopupController: ObservableObject {
         presentNextIfNeeded()
     }
 
+    func queueDevice(_ device: AppleDevice) {
+        if displayedDeviceID == device.id {
+            displayedDevice = device
+            return
+        }
+        pendingItems.append(.device(device))
+        presentNextIfNeeded()
+    }
+
+    func testAccessoryPopup() {
+        let dummyDevice = AppleDevice(
+            name: "Magic Mouse",
+            model: "Mouse",
+            connection: "Bluetooth",
+            batteryPercent: 88,
+            batteryLevels: ["Battery": 88],
+            chargingStates: ["Battery": false]
+        )
+        queueDevice(dummyDevice)
+    }
+
     func testChargerPopup() {
         let energy = SystemMonitor.readEnergyStatus()
         let watts = energy.adapterWatts.map { Int($0.rounded()) } ?? 96
@@ -642,6 +658,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
         overlay.hasShadow = false
         overlay.hidesOnDeactivate = false
         overlay.becomesKeyOnlyIfNeeded = true
+        overlay.appearance = NSAppearance(named: .darkAqua)
 
         let rootView: AnyView
         switch item {
@@ -657,7 +674,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
             rootView = AnyView(ChargerConnectionPopupView(initialCharger: charger, popup: self))
         }
 
-        let hostingView = NSHostingView(rootView: rootView)
+        let hostingView = NSHostingView(rootView: rootView.environment(\.colorScheme, .dark).preferredColorScheme(.dark))
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
@@ -773,10 +790,10 @@ private struct BatteryIndicator: View {
 
             Text(component.percent.map { "\($0)%" } ?? "—")
                 .font(.system(size: compact ? 8 : 10, weight: .semibold, design: .rounded))
-                .foregroundStyle((component.percent ?? 100) <= 20 ? Color.orange : Color.primary)
+                .foregroundStyle((component.percent ?? 100) <= 20 ? Color.orange : (compact ? Color.white : Color.primary))
             Text(component.title)
                 .font(.system(size: compact ? 7 : 8, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(compact ? Color.white.opacity(0.65) : Color.secondary)
             if !compact, let chargingLabel {
                 Text(chargingLabel)
                     .font(.system(size: 7, weight: component.isCharging == true ? .semibold : .regular))
@@ -812,14 +829,15 @@ private struct AccessoryConnectionPopupView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Connected")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.65))
                 Text(device.name)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
                 Text("Ready to use with your Mac")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.65))
             }
 
             Spacer(minLength: 6)
@@ -941,14 +959,15 @@ private struct ChargerConnectionPopupView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(statusHeader)
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.65))
                 Text(titleText)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
                 Text(subtitleText)
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.65))
                     .lineLimit(1)
             }
 
@@ -965,10 +984,10 @@ private struct ChargerConnectionPopupView: View {
 
                     Text(charger.batteryPercent.map { "\($0)%" } ?? "—")
                         .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .foregroundStyle((charger.batteryPercent ?? 100) <= 20 ? Color.orange : Color.primary)
+                        .foregroundStyle((charger.batteryPercent ?? 100) <= 20 ? Color.orange : Color.white)
                     Text("Mac")
                         .font(.system(size: 7, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.white.opacity(0.65))
                 }
                 .frame(minWidth: 32)
 
@@ -983,10 +1002,10 @@ private struct ChargerConnectionPopupView: View {
 
                         Text("\(watts)W")
                             .font(.system(size: 8, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.primary)
+                            .foregroundStyle(Color.white)
                         Text("Adapter")
                             .font(.system(size: 7, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.white.opacity(0.65))
                     }
                     .frame(minWidth: 32)
                 }
@@ -1002,10 +1021,10 @@ private struct ChargerConnectionPopupView: View {
 
                         Text(health)
                             .font(.system(size: 8, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.primary)
+                            .foregroundStyle(Color.white)
                         Text("Health")
                             .font(.system(size: 7, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.white.opacity(0.65))
                     }
                     .frame(minWidth: 32)
                 }

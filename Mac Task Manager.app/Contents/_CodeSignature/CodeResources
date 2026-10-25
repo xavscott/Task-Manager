@@ -22,10 +22,10 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			AaGlMnPzA5nZSxhhTDzznybYMls=
+			I1HufBjDhN34OgEfScvqadLqhWg=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"01a1a53273f30399d94b18614c3cf39f26d8325b" or cdhash H"9602841b233d991f95c7d83cf46cabf1cf2974e2"</string>
+			<string>cdhash H"2351ee7c18c384ddf83a011f49cbea69d2ea8568" or cdhash H"8795f7a9e8d0fbcc2bf2c76fd4623f1865dec00c"</string>
 		</dict>
 		<key>PlugIns/MacTaskManagerWidgetExtension.appex</key>
 		<dict>
