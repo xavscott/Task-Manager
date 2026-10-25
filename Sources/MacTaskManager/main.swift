@@ -450,6 +450,7 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     private var pendingItems: [PopupItem] = []
     private var queuedDeviceIDs = Set<String>()
     private var connectedIDs = Set<String>()
+    @Published var isDismissing: Bool = false
     private var displayedDeviceID: String?
     private var lastPowerSource: String?
     private var lastAdapterWatts: Double?
@@ -638,14 +639,13 @@ private final class AccessoryConnectionPopupController: ObservableObject {
     }
 
     private func show(_ item: PopupItem) {
-        let size = NSSize(width: 430, height: 112)
+        isDismissing = false
+        let windowSize = NSSize(width: 480, height: 128)
         let screen = NSApp.mainWindow?.screen ?? NSScreen.main
         let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        // Anchor to the physical top-center of the display (the notch area), not the
-        // visible frame, which begins below the menu bar and makes the pill float lower.
-        let origin = NSPoint(x: screenFrame.midX - size.width / 2, y: screenFrame.maxY - size.height)
+        let origin = NSPoint(x: screenFrame.midX - windowSize.width / 2, y: screenFrame.maxY - windowSize.height)
         let overlay = NSPanel(
-            contentRect: NSRect(origin: origin, size: size),
+            contentRect: NSRect(origin: origin, size: windowSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -684,25 +684,31 @@ private final class AccessoryConnectionPopupController: ObservableObject {
 
         dismissTask?.cancel()
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(8))
+            try? await Task.sleep(for: .seconds(7))
             guard !Task.isCancelled else { return }
             self?.dismissCurrent()
         }
     }
 
     func dismissCurrent() {
+        guard !isDismissing else { return }
+        isDismissing = true
         dismissTask?.cancel()
         dismissTask = nil
-        panel?.orderOut(nil)
-        panel = nil
-        displayedDevice = nil
-        displayedDeviceID = nil
-        displayedCharger = nil
 
-        if !pendingItems.isEmpty {
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(350))
-                self?.presentNextIfNeeded()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(360))
+            guard let self else { return }
+            self.panel?.orderOut(nil)
+            self.panel = nil
+            self.isDismissing = false
+            self.displayedDevice = nil
+            self.displayedDeviceID = nil
+            self.displayedCharger = nil
+
+            if !self.pendingItems.isEmpty {
+                try? await Task.sleep(for: .milliseconds(120))
+                self.presentNextIfNeeded()
             }
         }
     }
@@ -808,64 +814,171 @@ private struct BatteryIndicator: View {
     }
 }
 
+@MainActor private func currentNotchDimensions() -> (width: CGFloat, height: CGFloat) {
+    let screen = NSApp.mainWindow?.screen ?? NSScreen.main
+    var width: CGFloat = 185
+    var height: CGFloat = 32
+    if let screen {
+        if screen.safeAreaInsets.top > 0 {
+            height = max(screen.safeAreaInsets.top, 32)
+            if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+                let gap = right.origin.x - (left.origin.x + left.size.width)
+                if gap > 60 { width = gap }
+            }
+        }
+    }
+    return (width, height)
+}
+
+private struct DynamicIslandContainer<Content: View>: View {
+    @ObservedObject var popup: AccessoryConnectionPopupController
+    let targetWidth: CGFloat
+    let targetHeight: CGFloat
+    let content: Content
+
+    @State private var isExpanded = false
+    @State private var notchSize: (width: CGFloat, height: CGFloat) = (185, 32)
+
+    init(
+        popup: AccessoryConnectionPopupController,
+        targetWidth: CGFloat = 430,
+        targetHeight: CGFloat = 104,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.popup = popup
+        self.targetWidth = targetWidth
+        self.targetHeight = targetHeight
+        self.content = content()
+    }
+
+    private var isEffectivelyExpanded: Bool {
+        isExpanded && !popup.isDismissing
+    }
+
+    private var currentWidth: CGFloat {
+        isEffectivelyExpanded ? targetWidth : notchSize.width
+    }
+
+    private var currentHeight: CGFloat {
+        isEffectivelyExpanded ? targetHeight : notchSize.height
+    }
+
+    private var cornerRadii: RectangleCornerRadii {
+        RectangleCornerRadii(
+            topLeading: 0,
+            bottomLeading: isEffectivelyExpanded ? 26 : 14,
+            bottomTrailing: isEffectivelyExpanded ? 26 : 14,
+            topTrailing: 0
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                UnevenRoundedRectangle(cornerRadii: cornerRadii, style: .continuous)
+                    .fill(Color.black)
+                    .overlay(
+                        UnevenRoundedRectangle(cornerRadii: cornerRadii, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 0.75)
+                    )
+
+                content
+                    .frame(width: targetWidth, height: targetHeight)
+                    .opacity(isEffectivelyExpanded ? 1 : 0)
+                    .blur(radius: isEffectivelyExpanded ? 0 : 3)
+                    .clipped()
+            }
+            .frame(width: currentWidth, height: currentHeight, alignment: .top)
+            .clipShape(UnevenRoundedRectangle(cornerRadii: cornerRadii, style: .continuous))
+            .shadow(
+                color: Color.black.opacity(isEffectivelyExpanded ? 0.45 : 0.15),
+                radius: isEffectivelyExpanded ? 14 : 4,
+                x: 0,
+                y: isEffectivelyExpanded ? 7 : 2
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                popup.dismissCurrent()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear {
+            notchSize = currentNotchDimensions()
+            withAnimation(.spring(response: 0.46, dampingFraction: 0.72, blendDuration: 0)) {
+                isExpanded = true
+            }
+        }
+        .onChange(of: popup.isDismissing) { _, dismissing in
+            if dismissing {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    isExpanded = false
+                }
+            }
+        }
+    }
+}
+
 private struct AccessoryConnectionPopupView: View {
     let initialDevice: AppleDevice
     @ObservedObject var popup: AccessoryConnectionPopupController
 
-    @State private var isVisible = false
+    @State private var isContentVisible = false
 
     private var device: AppleDevice { popup.displayedDevice ?? initialDevice }
     private var kind: AccessoryPopupKind { AccessoryPopupKind.forName("\(device.name) \(device.model)") ?? .generic }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: kind.symbol)
-                .font(.system(size: 22, weight: .medium))
-                .symbolRenderingMode(.monochrome)
-                .foregroundStyle(popup.accentColor)
-                .frame(width: 42, height: 42)
-                .background(popup.accentColor.opacity(0.14), in: Circle())
+        DynamicIslandContainer(popup: popup, targetWidth: 430, targetHeight: 104) {
+            HStack(spacing: 12) {
+                Image(systemName: kind.symbol)
+                    .font(.system(size: 22, weight: .medium))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(popup.accentColor)
+                    .frame(width: 42, height: 42)
+                    .background(popup.accentColor.opacity(0.16), in: Circle())
+                    .scaleEffect(isContentVisible && !popup.isDismissing ? 1.0 : 0.35)
+                    .opacity(isContentVisible && !popup.isDismissing ? 1.0 : 0.0)
+                    .animation(.spring(response: 0.46, dampingFraction: 0.65).delay(0.04), value: isContentVisible && !popup.isDismissing)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Connected")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.65))
-                Text(device.name)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                Text("Ready to use with your Mac")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(0.65))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Connected")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                    Text(device.name)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text("Ready to use with your Mac")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                }
+                .offset(y: isContentVisible && !popup.isDismissing ? 0 : -6)
+                .opacity(isContentVisible && !popup.isDismissing ? 1.0 : 0.0)
+                .animation(.spring(response: 0.44, dampingFraction: 0.76).delay(0.06), value: isContentVisible && !popup.isDismissing)
+
+                Spacer(minLength: 6)
+
+                AccessoryBatteryIndicators(device: device, accentColor: popup.accentColor, compact: true, alignRight: true)
+                    .offset(x: isContentVisible && !popup.isDismissing ? 0 : 16)
+                    .opacity(isContentVisible && !popup.isDismissing ? 1.0 : 0.0)
+                    .animation(.spring(response: 0.46, dampingFraction: 0.72).delay(0.08), value: isContentVisible && !popup.isDismissing)
             }
-
-            Spacer(minLength: 6)
-
-            AccessoryBatteryIndicators(device: device, accentColor: popup.accentColor, compact: true, alignRight: true)
+            .padding(.horizontal, 16)
+            .frame(width: 430, height: 104)
+            .tint(popup.accentColor)
         }
-        .padding(.horizontal, 16)
-        .frame(width: 430, height: 112)
-        .tint(popup.accentColor)
-        .background(
-            Color.black,
-            in: UnevenRoundedRectangle(
-                cornerRadii: RectangleCornerRadii(
-                    topLeading: 0,
-                    bottomLeading: 24,
-                    bottomTrailing: 24,
-                    topTrailing: 0
-                ),
-                style: .continuous
-            )
-        )
-        .scaleEffect(isVisible ? 1 : 0.94)
-        .opacity(isVisible ? 1 : 0)
         .onAppear {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) { isVisible = true }
+            withAnimation(.spring(response: 0.46, dampingFraction: 0.72)) {
+                isContentVisible = true
+            }
         }
-        .onTapGesture {
-            popup.dismissCurrent()
+        .onChange(of: popup.isDismissing) { _, dismissing in
+            if dismissing {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    isContentVisible = false
+                }
+            }
         }
     }
 }
@@ -874,7 +987,7 @@ private struct ChargerConnectionPopupView: View {
     let initialCharger: ChargerInfo
     @ObservedObject var popup: AccessoryConnectionPopupController
 
-    @State private var isVisible = false
+    @State private var isContentVisible = false
 
     private var charger: ChargerInfo { popup.displayedCharger ?? initialCharger }
 
@@ -948,110 +1061,113 @@ private struct ChargerConnectionPopupView: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 20, weight: .semibold))
-                .symbolRenderingMode(.monochrome)
-                .foregroundStyle(chargingColor)
-                .frame(width: 42, height: 42)
-                .background(chargingColor.opacity(0.16), in: Circle())
+        DynamicIslandContainer(popup: popup, targetWidth: 430, targetHeight: 104) {
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(chargingColor)
+                    .frame(width: 42, height: 42)
+                    .background(chargingColor.opacity(0.18), in: Circle())
+                    .scaleEffect(isContentVisible && !popup.isDismissing ? 1.0 : 0.35)
+                    .opacity(isContentVisible && !popup.isDismissing ? 1.0 : 0.0)
+                    .animation(.spring(response: 0.46, dampingFraction: 0.65).delay(0.04), value: isContentVisible && !popup.isDismissing)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(statusHeader)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.65))
-                Text(titleText)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                Text(subtitleText)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(0.65))
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 6)
-
-            HStack(alignment: .top, spacing: 10) {
-                // Battery indicator
-                VStack(spacing: 1) {
-                    Image(systemName: batterySymbol)
-                        .font(.system(size: 18, weight: .semibold))
-                        .symbolRenderingMode(.monochrome)
-                        .foregroundStyle(chargingColor)
-                        .frame(width: 24, height: 24)
-
-                    Text(charger.batteryPercent.map { "\($0)%" } ?? "—")
-                        .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .foregroundStyle((charger.batteryPercent ?? 100) <= 20 ? Color.orange : Color.white)
-                    Text("Mac")
-                        .font(.system(size: 7, weight: .medium))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(statusHeader)
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .foregroundStyle(Color.white.opacity(0.65))
+                    Text(titleText)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text(subtitleText)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                        .lineLimit(1)
                 }
-                .frame(minWidth: 32)
+                .offset(y: isContentVisible && !popup.isDismissing ? 0 : -6)
+                .opacity(isContentVisible && !popup.isDismissing ? 1.0 : 0.0)
+                .animation(.spring(response: 0.44, dampingFraction: 0.76).delay(0.06), value: isContentVisible && !popup.isDismissing)
 
-                // Watts indicator
-                if let watts = charger.watts {
+                Spacer(minLength: 6)
+
+                HStack(alignment: .top, spacing: 10) {
+                    // Battery indicator
                     VStack(spacing: 1) {
-                        Image(systemName: "bolt.fill")
+                        Image(systemName: batterySymbol)
                             .font(.system(size: 18, weight: .semibold))
                             .symbolRenderingMode(.monochrome)
                             .foregroundStyle(chargingColor)
                             .frame(width: 24, height: 24)
 
-                        Text("\(watts)W")
+                        Text(charger.batteryPercent.map { "\($0)%" } ?? "—")
                             .font(.system(size: 8, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.white)
-                        Text("Adapter")
+                            .foregroundStyle((charger.batteryPercent ?? 100) <= 20 ? Color.orange : Color.white)
+                        Text("Mac")
                             .font(.system(size: 7, weight: .medium))
                             .foregroundStyle(Color.white.opacity(0.65))
                     }
                     .frame(minWidth: 32)
-                }
 
-                // Health or status indicator
-                if let health = charger.batteryHealth {
-                    VStack(spacing: 1) {
-                        Image(systemName: "heart.fill")
-                            .font(.system(size: 16, weight: .semibold))
-                            .symbolRenderingMode(.monochrome)
-                            .foregroundStyle(popup.accentColor)
-                            .frame(width: 24, height: 24)
+                    // Watts indicator
+                    if let watts = charger.watts {
+                        VStack(spacing: 1) {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .symbolRenderingMode(.monochrome)
+                                .foregroundStyle(chargingColor)
+                                .frame(width: 24, height: 24)
 
-                        Text(health)
-                            .font(.system(size: 8, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.white)
-                        Text("Health")
-                            .font(.system(size: 7, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.65))
+                            Text("\(watts)W")
+                                .font(.system(size: 8, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Color.white)
+                            Text("Adapter")
+                                .font(.system(size: 7, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.65))
+                        }
+                        .frame(minWidth: 32)
                     }
-                    .frame(minWidth: 32)
+
+                    // Health indicator
+                    if let health = charger.batteryHealth {
+                        VStack(spacing: 1) {
+                            Image(systemName: "heart.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .symbolRenderingMode(.monochrome)
+                                .foregroundStyle(popup.accentColor)
+                                .frame(width: 24, height: 24)
+
+                            Text(health)
+                                .font(.system(size: 8, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Color.white)
+                            Text("Health")
+                                .font(.system(size: 7, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.65))
+                        }
+                        .frame(minWidth: 32)
+                    }
                 }
+                .offset(x: isContentVisible && !popup.isDismissing ? 0 : 16)
+                .opacity(isContentVisible && !popup.isDismissing ? 1.0 : 0.0)
+                .animation(.spring(response: 0.46, dampingFraction: 0.72).delay(0.08), value: isContentVisible && !popup.isDismissing)
+            }
+            .padding(.horizontal, 16)
+            .frame(width: 430, height: 104)
+            .tint(chargingColor)
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.46, dampingFraction: 0.72)) {
+                isContentVisible = true
             }
         }
-        .padding(.horizontal, 16)
-        .frame(width: 430, height: 112)
-        .tint(chargingColor)
-        .background(
-            Color.black,
-            in: UnevenRoundedRectangle(
-                cornerRadii: RectangleCornerRadii(
-                    topLeading: 0,
-                    bottomLeading: 24,
-                    bottomTrailing: 24,
-                    topTrailing: 0
-                ),
-                style: .continuous
-            )
-        )
-        .scaleEffect(isVisible ? 1 : 0.94)
-        .opacity(isVisible ? 1 : 0)
-        .onAppear {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) { isVisible = true }
-        }
-        .onTapGesture {
-            popup.dismissCurrent()
+        .onChange(of: popup.isDismissing) { _, dismissing in
+            if dismissing {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    isContentVisible = false
+                }
+            }
         }
     }
 }
